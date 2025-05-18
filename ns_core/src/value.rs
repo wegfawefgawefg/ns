@@ -14,7 +14,7 @@ pub enum Value {
     QuotedSymbol(Rc<String>),
     List(Rc<Vec<Value>>),
     Closure(Rc<Closure>),
-    StructInstance(Rc<RefCell<StructData>>), // StructData import will be used later
+    StructInstance(Rc<RefCell<StructData>>),
 }
 
 /// Represents a closure in "ns".
@@ -27,10 +27,10 @@ pub struct Closure {
 }
 
 /// Represents the actual data of a struct instance.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)] // PartialEq for testing
 pub struct StructData {
-    pub type_name: Rc<String>,
-    pub fields: HashMap<Rc<String>, Value>,
+    pub type_name: Rc<String>, // The name of the struct type (e.g., "Point")
+    pub fields: HashMap<Rc<String>, Value>, // Field names to their values
 }
 
 #[derive(Clone, Debug)]
@@ -49,9 +49,21 @@ impl PartialEq for Value {
             (Value::String(s1), Value::String(s2)) => Rc::ptr_eq(s1, s2) || s1 == s2,
             (Value::NoneValue, Value::NoneValue) => true,
             (Value::QuotedSymbol(s1), Value::QuotedSymbol(s2)) => Rc::ptr_eq(s1, s2) || s1 == s2,
-            (Value::List(l1), Value::List(l2)) => Rc::ptr_eq(l1, l2) || l1 == l2, // Basic reference equality for lists
-            (Value::Closure(c1), Value::Closure(c2)) => Rc::ptr_eq(c1, c2), // Closures by reference
-            (Value::StructInstance(si1), Value::StructInstance(si2)) => Rc::ptr_eq(si1, si2), // Structs by reference
+            (Value::List(l1), Value::List(l2)) => {
+                if Rc::ptr_eq(l1, l2) {
+                    return true;
+                }
+                if l1.len() != l2.len() {
+                    return false;
+                }
+                l1.iter().zip(l2.iter()).all(|(a, b)| a == b) // Deep comparison for lists
+            }
+            (Value::Closure(c1), Value::Closure(c2)) => Rc::ptr_eq(c1, c2),
+            (Value::StructInstance(si1), Value::StructInstance(si2)) => {
+                // For structs, typically reference equality unless deep value equality is desired
+                // For now, reference equality. If deep, compare type_name and fields.
+                Rc::ptr_eq(si1, si2)
+            }
             _ => false,
         }
     }
@@ -68,7 +80,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::Boolean(b) => write!(f, "{}", b),
-            Value::String(s) => write!(f, "{}", s), // Consider f.write_str(s) for directness
+            Value::String(s) => write!(f, "{}", s),
             Value::NoneValue => write!(f, "none"),
             Value::QuotedSymbol(s) => write!(f, "'{}", s),
             Value::List(items_rc) => {
@@ -92,21 +104,19 @@ impl fmt::Display for Value {
             Value::StructInstance(struct_data_rc) => {
                 let struct_data = struct_data_rc.borrow();
                 write!(f, "(struct {} {{ ", struct_data.type_name)?;
-                let mut first = true;
-                for (key, val) in &struct_data.fields {
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", key, val)?;
-                    first = false;
-                }
+                let mut field_items: Vec<String> = struct_data
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
+                field_items.sort(); // Sort for consistent output order
+                write!(f, "{}", field_items.join(", "))?;
                 write!(f, " }})")
             }
         }
     }
 }
 
-// Methods for Value
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -114,19 +124,18 @@ impl Value {
             Value::Boolean(_) => "boolean",
             Value::String(_) => "string",
             Value::NoneValue => "none",
-            Value::QuotedSymbol(_) => "quoted-symbol", // Lispier name
+            Value::QuotedSymbol(_) => "quoted-symbol",
             Value::List(_) => "list",
             Value::Closure(_) => "closure",
             Value::StructInstance(_) => "struct-instance",
         }
     }
 
-    // Helper for truthiness, as per Lisp conventions (false and 'none' are falsy)
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Boolean(b) => *b,
             Value::NoneValue => false,
-            _ => true, // All other values (numbers, strings, lists, closures, structs) are truthy
+            _ => true,
         }
     }
 }

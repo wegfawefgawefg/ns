@@ -10,22 +10,29 @@ pub enum OpCode {
     Sub = 11,
     Mul = 12,
     Div = 13,
+    Modulo = 14, // New: Modulo
     Eq = 20,
     Lt = 21,
     Gt = 22,
     Not = 23,
+    GreaterThanOrEqual = 24,
+    LessThanOrEqual = 25,
+    NotEqual = 26, // New comparison ops
+
     Load = 30,
-    Store = 31, // These might become LoadGlobal/StoreGlobal or be differentiated
+    Store = 31,
     Jump = 40,
     JumpIfFalse = 41,
-    MakeClosure = 45, // The BytecodeInstruction variant will carry more info
-    Call = 50,        // The BytecodeInstruction variant will carry arity
+    MakeClosure = 45,
+    Call = 50,
     Return = 51,
     MakeStruct = 55,
     GetField = 56,
     SetField = 57,
     Halt = 60,
     Print = 61,
+    ThrowError = 62, // New: ThrowError
+
     IsNone = 70,
     Cons = 71,
     First = 72,
@@ -45,24 +52,23 @@ pub enum BytecodeInstruction {
     Push(Value),
     LoadGlobal(String),
     StoreGlobal(String),
-    LoadLocal(usize),  // Index into current frame's local values vector
-    StoreLocal(usize), // Index into current frame's local values vector
+    LoadLocal(usize),
+    StoreLocal(usize),
     Jump(StringOrPc),
     JumpIfFalse(StringOrPc),
     MakeClosure {
-        label: String, // Label of the function's code segment
-        arity: usize,  // Number of parameters the closure expects
-                       // Future: upvalue_capture_info: Vec<UpvalueCaptureDesc>,
+        label: String,
+        arity: usize,
     },
     Call {
-        arity: usize, // Number of arguments being passed
+        arity: usize,
     },
     MakeStruct {
         type_name: String,
-        field_names: Vec<String>,
+        field_names: Vec<String>, // Order of fields for initialization
     },
-    GetField(String),
-    SetField(String),
+    GetField(String), // Field name
+    SetField(String), // Field name
     MakeList {
         count: usize,
     },

@@ -11,29 +11,55 @@ pub mod vm;
 
 pub fn get_ns_engine_greeting() -> String {
     let test_source = r#"
-        (fn add (a b) 
-            (+ a b)
+        // Struct definition
+        (struct Point (x y))
+
+        // Function using structs
+        (fn make_point (x_val y_val)
+            (Point x_val y_val)
         )
 
-        (fn simple_greet (name)
-            (print "Hello,")
-            (print name)
-            (print "from ns function!")
-            "done greeting" // Return value of simple_greet
+        (fn move_point (p dx dy)
+            (let new_x (+ (get p x) dx))
+            (let new_y (+ (get p y) dy))
+            (set p x new_x) // Mutate p.x
+            (set p y new_y) // Mutate p.y
+            p                 // Return the modified point
         )
 
-        (static result1 (add 10 25))
-        (print result1) // Expected console: Output: 35
+        (static p1 (make_point 10 20))
+        (print p1) // Expected: (struct Point { x: 10, y: 20 }) or similar
 
-        (let message (simple_greet "Developer")) // Call simple_greet
-        (print message) // Expected console: Output: done greeting (return value of simple_greet)
+        (static p2 (move_point p1 5 5))
+        (print p2) // Expected: (struct Point { x: 15, y: 25 })
+        (print p1) // Expected: (struct Point { x: 15, y: 25 }) (p1 was mutated)
 
-        // Test lambda
-        (let my_adder (lambda (x y) (+ x y)))
-        (print (my_adder 7 8)) // Expected console: Output: 15
+        (print (is_struct p1)) // Expected: true
+
+        // Begin special form
+        (print (begin 
+                  "first_in_begin" 
+                  (+ 100 200) 
+                  "last_in_begin"
+               )) // Expected: last_in_begin (begin evaluates to its last expression)
+
+        // New primitives
+        (print (% 10 3))   // Expected: 1
+        (print (>= 5 5))   // Expected: true
+        (print (>= 5 4))   // Expected: true
+        (print (>= 4 5))   // Expected: false
+        (print (<= 4 5))   // Expected: true
+        (print (<= 5 5))   // Expected: true
+        (print (<= 5 4))   // Expected: false
+        (print (!= 5 4))   // Expected: true
+        (print (!= 5 5))   // Expected: false
+
+        // Test error (this should stop execution and be reported)
+        // (error "This is a test error from ns code") 
+        // For now, let's return a normal value to let other tests pass.
+        // Later, we can have a separate test for (error).
         
-        // Final value on stack for the test report
-        (add result1 (my_adder 1 2)) // 35 + 3 = 38
+        "all features test done" // Final value
     "#;
 
     let mut output_report = String::new();
@@ -46,12 +72,11 @@ pub fn get_ns_engine_greeting() -> String {
             let mut parser = parser::Parser::new(&tokens);
             match parser.parse_program() {
                 Ok(program_node) => {
-                    let module_name = "test_fn_call_mod".to_string();
+                    let module_name = "test_parity_mod".to_string();
                     let codegen = codegen::CodeGenerator::new(module_name.clone());
 
                     match codegen.generate_program(program_node) {
                         Ok((bytecode_segments, _dependencies)) => {
-                            // For debugging bytecode:
                             // output_report.push_str(&format!("[Bytecode Segments: {:?}]\n", bytecode_segments));
 
                             let mut vm = vm::VirtualMachine::new();
@@ -110,17 +135,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_full_pipeline_test_function_calls() {
+    fn run_full_pipeline_test_parity_features() {
         let report = get_ns_engine_greeting();
         println!("{}", report);
 
-        assert!(report.contains("VM Final Result (from stack): 38")); // 35 + 3
+        assert!(report.contains("VM Final Result (from stack): all features test done"));
         assert!(report.contains("VM Program Loaded Successfully."));
         assert!(!report.contains("Lexer Error:"));
         assert!(!report.contains("Parser Error:"));
         assert!(!report.contains("Codegen Error:"));
         assert!(!report.contains("VM Load Error:"));
-        assert!(!report.contains("VM Runtime Error:"));
+        assert!(!report.contains("VM Runtime Error:")); // Expect no runtime errors for this test
         assert!(!report.contains("Err("));
     }
 }

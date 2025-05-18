@@ -1,7 +1,7 @@
 // ns_project_root/ns_core/src/vm.rs
 use crate::error::NsError;
 use crate::opcode::{BytecodeInstruction, OpCode, StringOrPc};
-use crate::value::{Closure, EnvironmentChain, Scope, StructData, Value}; // Uncommented StructData
+use crate::value::{Closure, EnvironmentChain, Scope, StructData, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -26,7 +26,6 @@ pub struct VirtualMachine {
 
 impl VirtualMachine {
     pub fn new() -> Self {
-        // Initial env chain will be set up more robustly in load_program
         VirtualMachine {
             bytecode_segments: HashMap::new(),
             current_segment_name: Rc::new("".to_string()),
@@ -34,7 +33,7 @@ impl VirtualMachine {
             ip: 0,
             operand_stack: Vec::new(),
             call_stack: Vec::new(),
-            current_env_chain: Vec::new(), // Will be properly initialized in load_program
+            current_env_chain: Vec::new(),
             label_to_pc: HashMap::new(),
         }
     }
@@ -50,16 +49,13 @@ impl VirtualMachine {
                 main_segment_name
             )));
         }
-
         self.bytecode_segments.clear();
         self.label_to_pc.clear();
-
         for (name, instructions) in segments {
             let segment_name_rc = Rc::new(name);
             let mut current_segment_labels = HashMap::new();
             let mut processed_instructions = Vec::new();
             let mut effective_pc = 0;
-
             for instr in instructions.iter() {
                 if let BytecodeInstruction::LabelDef(label_name) = instr {
                     if current_segment_labels
@@ -81,7 +77,6 @@ impl VirtualMachine {
             self.label_to_pc
                 .insert(segment_name_rc, current_segment_labels);
         }
-
         let main_segment_rc = Rc::new(main_segment_name.to_string());
         self.current_segment_name = main_segment_rc.clone();
         self.current_bytecode = self
@@ -94,11 +89,9 @@ impl VirtualMachine {
         self.ip = 0;
         self.operand_stack.clear();
         self.call_stack.clear();
-
         let global_scope_map = Rc::new(RefCell::new(HashMap::new()));
         let main_module_locals = Scope::Locals(RefCell::new(Vec::new()));
         self.current_env_chain = vec![Scope::Lexical(global_scope_map), main_module_locals];
-
         Ok(())
     }
 
@@ -130,8 +123,10 @@ impl VirtualMachine {
                     break;
                 } else if !self.call_stack.is_empty() {
                     return Err(NsError::Vm(format!(
-                        "Reached end of function segment '{}' (IP: {}, len: {}) without a Return instruction.",
-                        self.current_segment_name, self.ip, self.current_bytecode.len()
+                        "Reached end of function segment '{}' (IP: {}, len: {}) without Return.",
+                        self.current_segment_name,
+                        self.ip,
+                        self.current_bytecode.len()
                     )));
                 } else {
                     return Err(NsError::Vm(format!(
@@ -143,6 +138,8 @@ impl VirtualMachine {
 
             let instruction = self.current_bytecode[self.ip].clone();
             self.ip += 1;
+
+            // println!("[VM] IP: {}, Seg: '{}', Instr: {:?}, Stack: {:?}", self.ip - 1, self.current_segment_name, instruction, self.operand_stack.iter().map(|v| format!("{}", v)).collect::<Vec<_>>());
 
             match instruction {
                 BytecodeInstruction::Operation(op) => match op {
@@ -159,9 +156,13 @@ impl VirtualMachine {
                     | OpCode::Sub
                     | OpCode::Mul
                     | OpCode::Div
+                    | OpCode::Modulo
                     | OpCode::Eq
                     | OpCode::Lt
-                    | OpCode::Gt => {
+                    | OpCode::Gt
+                    | OpCode::GreaterThanOrEqual
+                    | OpCode::LessThanOrEqual
+                    | OpCode::NotEqual => {
                         let right_op = self.operand_stack.pop().ok_or_else(|| {
                             NsError::Vm(format!("{:?} needs 2 operands (missing 1st)", op))
                         })?;
@@ -184,10 +185,20 @@ impl VirtualMachine {
                                             Value::Number(l / r)
                                         }
                                     }
+                                    OpCode::Modulo => {
+                                        if r == 0.0 {
+                                            return Err(NsError::Vm("Modulo by zero".to_string()));
+                                        } else {
+                                            Value::Number(l % r)
+                                        }
+                                    }
                                     OpCode::Eq => Value::Boolean(l == r),
                                     OpCode::Lt => Value::Boolean(l < r),
                                     OpCode::Gt => Value::Boolean(l > r),
-                                    _ => unreachable!(),
+                                    OpCode::GreaterThanOrEqual => Value::Boolean(l >= r),
+                                    OpCode::LessThanOrEqual => Value::Boolean(l <= r),
+                                    OpCode::NotEqual => Value::Boolean(l != r),
+                                    _ => unreachable!("Binary op {:?} not handled for numbers", op),
                                 };
                                 self.operand_stack.push(result);
                             }
@@ -199,6 +210,9 @@ impl VirtualMachine {
                             }
                             (v1, v2) if op == OpCode::Eq => {
                                 self.operand_stack.push(Value::Boolean(v1 == v2));
+                            }
+                            (v1, v2) if op == OpCode::NotEqual => {
+                                self.operand_stack.push(Value::Boolean(v1 != v2));
                             }
                             (l_val, r_val) => {
                                 return Err(NsError::Vm(format!(
@@ -224,6 +238,19 @@ impl VirtualMachine {
                                 .pop()
                                 .ok_or_else(|| NsError::Vm("PRINT requires a value".to_string()))?
                         );
+                    }
+                    OpCode::ThrowError => {
+                        let msg_val = self.operand_stack.pop().ok_or_else(|| {
+                            NsError::Vm("ERROR primitive requires a message string".to_string())
+                        })?;
+                        if let Value::String(s) = msg_val {
+                            return Err(NsError::Vm(format!("User Error: {}", s)));
+                        } else {
+                            return Err(NsError::Vm(format!(
+                                "ERROR primitive expects a string argument, got {}",
+                                msg_val.type_name()
+                            )));
+                        }
                     }
                     OpCode::Return => {
                         if let Some(frame) = self.call_stack.pop() {
@@ -424,9 +451,15 @@ impl VirtualMachine {
                         Value::Closure(closure_rc) => {
                             let closure = &*closure_rc;
                             if closure.arity != arity {
-                                return Err(NsError::Vm(format!("Function '{}' called with incorrect arity. Expected {}, got {}.",
-                                    closure.name.as_ref().map_or_else(|| closure.code_label.as_str(), |n| n.as_str()),
-                                    closure.arity, arity)));
+                                return Err(NsError::Vm(format!(
+                                    "Function '{}' called with incorrect arity. Expected {}, got {}.",
+                                    closure
+                                        .name
+                                        .as_ref()
+                                        .map_or_else(|| closure.code_label.as_str(), |n| n.as_str()),
+                                    closure.arity,
+                                    arity
+                                )));
                             }
 
                             let frame = CallFrame {
@@ -437,7 +470,6 @@ impl VirtualMachine {
                             self.call_stack.push(frame);
 
                             let new_local_values_vec = Vec::with_capacity(arity);
-
                             let new_local_scope = Scope::Locals(RefCell::new(new_local_values_vec));
 
                             self.current_env_chain = closure.defining_env.clone();
@@ -555,7 +587,7 @@ impl VirtualMachine {
                             self.operand_stack.len()
                         )));
                     }
-                    let mut fields_map = HashMap::new();
+                    let mut fields_map = HashMap::with_capacity(field_names.len());
                     for field_name_str in field_names.iter().rev() {
                         let value = self.operand_stack.pop().unwrap();
                         fields_map.insert(Rc::new(field_name_str.clone()), value);
@@ -608,7 +640,7 @@ impl VirtualMachine {
                     match instance_val {
                         Value::StructInstance(struct_data_rc) => {
                             let mut struct_data = struct_data_rc.borrow_mut();
-                            let field_name_rc = Rc::new(field_name_str);
+                            let field_name_rc = Rc::new(field_name_str.clone());
                             if struct_data.fields.contains_key(&field_name_rc) {
                                 struct_data.fields.insert(field_name_rc, new_value);
                                 self.operand_stack
@@ -616,7 +648,7 @@ impl VirtualMachine {
                             } else {
                                 return Err(NsError::Vm(format!(
                                     "Struct '{}' has no field '{}' to set",
-                                    struct_data.type_name, field_name_rc
+                                    struct_data.type_name, field_name_str
                                 )));
                             }
                         }
@@ -643,7 +675,7 @@ impl VirtualMachine {
                     .copied()
                     .ok_or_else(|| {
                         NsError::Vm(format!(
-                            "Undefined label '{}' in segment '{}'",
+                            "Undefined label '{}' in seg '{}'",
                             label_name, self.current_segment_name
                         ))
                     });
@@ -658,7 +690,7 @@ impl VirtualMachine {
 // Add a debug helper for Scope if it's not already deriving Debug
 // (It is deriving Debug in value.rs, so this is not strictly needed here but shown for completeness if it wasn't)
 impl Scope {
-    #[allow(dead_code)] // May be useful for debugging later
+    #[allow(dead_code)]
     fn type_name_debug(&self) -> &'static str {
         match self {
             Scope::Locals(_) => "Scope::Locals",

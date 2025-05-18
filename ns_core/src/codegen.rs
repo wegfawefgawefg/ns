@@ -22,7 +22,7 @@ struct FunctionContext {
     label_prefix: String,
     label_counter: usize,
     named_locals: HashMap<Rc<String>, usize>,
-    block_scope_names_stack: Vec<HashSet<Rc<String>>>,
+    block_scope_names_stack: Vec<HashSet<Rc<String>>>, // For stricter 'let' scoping if needed later
     local_idx_counter: usize,
 }
 
@@ -86,55 +86,64 @@ impl CodeGenerator {
     }
 
     fn enter_block_scope(&mut self) {
-        self.current_fn_context_mut()
-            .block_scope_names_stack
-            .push(HashSet::new());
+        // If stricter block scoping is needed where names are removed from named_locals upon exit,
+        // this would push a new HashSet onto block_scope_names_stack.
+        // For now, 'let' extends the current function's named_locals.
     }
 
     fn exit_block_scope(&mut self) {
-        let context_stack_depth = self.function_contexts.len();
-        let current_fn_context = self.current_fn_context_mut();
-
-        if let Some(block_names) = current_fn_context.block_scope_names_stack.pop() {
-            if context_stack_depth > 1 {
-                for name in block_names {
-                    current_fn_context.named_locals.remove(&name);
-                }
-            }
-        } else {
-            eprintln!("Warning: CodeGenerator: Attempted to pop block scope when stack is empty.");
-        }
+        // If block_scope_names_stack was used to track names specific to the current 'let' block
+        // for shadowing and cleanup from named_locals, this is where it would happen.
+        // The current model (from codegen_rs_let_scope_final_fix) makes 'let' bindings persist
+        // in the current function's named_locals map until the function exits,
+        // or until shadowed by an inner binding with the same name.
+        // The check `if context_stack_depth > 1` in the previous version was to differentiate
+        // top-level 'let' from 'let' inside functions.
+        // For now, this function remains simple as 'let' bindings are added to the current FunctionContext's named_locals.
     }
 
     fn define_local_variable(&mut self, name: Rc<String>) -> Result<usize, NsError> {
         let context = self.current_fn_context_mut();
         let index = context.local_idx_counter;
+
+        // Insert/overwrite in the function's flat local map. Shadowing occurs here.
+        // Subsequent lookups for 'name' in this scope will get this 'index'.
         context.named_locals.insert(name.clone(), index);
-        if let Some(current_block_names) = context.block_scope_names_stack.last_mut() {
-            current_block_names.insert(name.clone());
-        }
+
+        // If we were using block_scope_names_stack for stricter cleanup:
+        // if let Some(current_block_names) = context.block_scope_names_stack.last_mut() {
+        //     current_block_names.insert(name.clone());
+        // }
+
         context.local_idx_counter += 1;
         Ok(index)
     }
 
     fn find_symbol(&self, name: &Rc<String>) -> Option<SymbolBinding> {
+        // Search current function's active named locals
         if let Some(context) = self.function_contexts.last() {
             if let Some(index) = context.named_locals.get(name) {
+                // println!("[Codegen::find_symbol] Found '{}' as Local with index {}", name, index); // DEBUG
                 return Some(SymbolBinding::Local { index: *index });
             }
         }
+        // TODO: Implement full lexical scoping for upvalues by searching outer function_contexts stack.
+
         if let Some((label, arity)) = self.global_functions.get(name) {
+            // println!("[Codegen::find_symbol] Found '{}' as GlobalFunction", name); // DEBUG
             return Some(SymbolBinding::Function {
                 label: label.clone(),
                 arity: *arity,
             });
         }
         if let Some(fields) = self.global_structs.get(name) {
+            // println!("[Codegen::find_symbol] Found '{}' as GlobalStruct", name); // DEBUG
             return Some(SymbolBinding::Struct {
                 fields: fields.clone(),
             });
         }
-        Some(SymbolBinding::Global)
+        // println!("[Codegen::find_symbol] Did not find '{}' locally or as known global fn/struct. Assuming Global.", name); // DEBUG
+        Some(SymbolBinding::Global) // Assume global if not found locally or as known fn/struct
     }
 
     fn current_bytecode_mut(&mut self) -> &mut Vec<BytecodeInstruction> {
@@ -236,18 +245,26 @@ impl CodeGenerator {
             Expression::Boolean(b) => self.emit(BytecodeInstruction::Push(Value::Boolean(b))),
             Expression::NoneLiteral => self.emit(BytecodeInstruction::Push(Value::NoneValue)),
             Expression::Symbol(name) => {
-                // DEBUG PRINT for Symbol expression
-                // println!("[Codegen::generate_expression] Symbol: {}, current segment: {}", name, self.current_segment_name);
+                println!(
+                    "[Codegen::generate_expression] Symbol: '{}', current segment: {}",
+                    name, self.current_segment_name
+                ); // DEBUG
                 match self.find_symbol(&name) {
                     Some(SymbolBinding::Local { index }) => {
-                        // println!("[Codegen::generate_expression] Emitting LoadLocal({}) for {}", index, name);
+                        println!(
+                            "[Codegen::generate_expression] Emitting LoadLocal({}) for '{}'",
+                            index, name
+                        ); // DEBUG
                         self.emit(BytecodeInstruction::LoadLocal(index));
                     }
                     Some(SymbolBinding::Global)
                     | Some(SymbolBinding::Function { .. })
                     | Some(SymbolBinding::Struct { .. })
                     | None => {
-                        // println!("[Codegen::generate_expression] Emitting LoadGlobal for {}", name);
+                        println!(
+                            "[Codegen::generate_expression] Emitting LoadGlobal for '{}'",
+                            name
+                        ); // DEBUG
                         self.emit(BytecodeInstruction::LoadGlobal(name.to_string()));
                     }
                 }
@@ -403,14 +420,21 @@ impl CodeGenerator {
 
     fn generate_call_node(&mut self, node: CallNode) -> Result<(), NsError> {
         let num_args = node.arguments.len();
-        // println!("[Codegen::generate_call_node] Attempting call for: {:?}, in segment: {}", node.callable_expr, self.current_segment_name); // DEBUG
+        println!(
+            "[Codegen::generate_call_node] START. Callable: {:?}, Args: {:?}, In Segment: {}",
+            node.callable_expr, node.arguments, self.current_segment_name
+        );
 
-        if let Expression::Symbol(symbol_rc) = &node.callable_expr {
-            let name = symbol_rc.as_str();
-            // println!("[Codegen::generate_call_node] Callable is Symbol: '{}'", name); // DEBUG
+        if let Expression::Symbol(symbol_rc_callable) = &node.callable_expr {
+            // Renamed to avoid conflict
+            let name = symbol_rc_callable.as_str();
+            println!(
+                "[Codegen::generate_call_node] Callable is Symbol: '{}'",
+                name
+            );
             match name {
-                "+" | "-" | "*" | "/" | "=" | ">" | "<" => {
-                    // println!("[Codegen::generate_call_node] Matched primitive binary op: '{}'", name); // DEBUG
+                "+" | "-" | "*" | "/" | "%" | "=" | ">" | "<" | ">=" | "<=" | "!=" => {
+                    println!("[Codegen::generate_call_node] Matched primitive arithmetic/comparison op: '{}'", name);
                     if num_args != 2 {
                         return Err(NsError::Codegen(format!(
                             "Operator '{}' expects 2 args, got {}",
@@ -424,9 +448,13 @@ impl CodeGenerator {
                         "-" => self.emit_op(OpCode::Sub),
                         "*" => self.emit_op(OpCode::Mul),
                         "/" => self.emit_op(OpCode::Div),
+                        "%" => self.emit_op(OpCode::Modulo),
                         "=" => self.emit_op(OpCode::Eq),
                         ">" => self.emit_op(OpCode::Gt),
                         "<" => self.emit_op(OpCode::Lt),
+                        ">=" => self.emit_op(OpCode::GreaterThanOrEqual),
+                        "<=" => self.emit_op(OpCode::LessThanOrEqual),
+                        "!=" => self.emit_op(OpCode::NotEqual),
                         _ => unreachable!(),
                     }
                     return Ok(());
@@ -455,6 +483,17 @@ impl CodeGenerator {
                         }
                     }
                     self.emit(BytecodeInstruction::Push(Value::NoneValue));
+                    return Ok(());
+                }
+                "error" => {
+                    if num_args != 1 {
+                        return Err(NsError::Codegen(format!(
+                            "Primitive 'error' expects 1 string argument, got {}",
+                            num_args
+                        )));
+                    }
+                    self.generate_expression(node.arguments[0].clone())?;
+                    self.emit_op(OpCode::ThrowError);
                     return Ok(());
                 }
                 "list" => {
@@ -514,10 +553,15 @@ impl CodeGenerator {
                     }
                     return Ok(());
                 }
-                _ if self.global_structs.contains_key(symbol_rc) => {
+                _ if self.global_structs.contains_key(symbol_rc_callable) => {
+                    // Use symbol_rc_callable
+                    println!(
+                        "[Codegen::generate_call_node] Matched struct constructor: '{}'",
+                        name
+                    ); // DEBUG
                     let fields_clone: Vec<Rc<String>> = self
                         .global_structs
-                        .get(symbol_rc)
+                        .get(symbol_rc_callable)
                         .expect("Struct checked")
                         .clone();
                     if num_args != fields_clone.len() {
@@ -538,11 +582,15 @@ impl CodeGenerator {
                     return Ok(());
                 }
                 _ => {
-                    // println!("[Codegen::generate_call_node] Symbol '{}' is NOT a known primitive/struct, falling to general call.", name); // DEBUG
+                    println!("[Codegen::generate_call_node] Symbol '{}' is NOT a known primitive/struct, falling to general call.", name);
+                    // DEBUG
                 }
             }
         } else {
-            // println!("[Codegen::generate_call_node] Callable is NOT a symbol: {:?}", node.callable_expr); // DEBUG
+            println!(
+                "[Codegen::generate_call_node] Callable is NOT a symbol: {:?}",
+                node.callable_expr
+            ); // DEBUG
         }
 
         // println!("[Codegen::generate_call_node] Generating GENERAL call for: {:?}, num_args: {}", node.callable_expr, num_args); // DEBUG

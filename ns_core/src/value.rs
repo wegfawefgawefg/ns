@@ -27,15 +27,16 @@ pub struct Closure {
 }
 
 /// Represents the actual data of a struct instance.
-#[derive(Clone, Debug, PartialEq)] // PartialEq for testing
+#[derive(Clone, Debug, PartialEq)]
 pub struct StructData {
-    pub type_name: Rc<String>, // The name of the struct type (e.g., "Point")
-    pub fields: HashMap<Rc<String>, Value>, // Field names to their values
+    pub type_name: Rc<String>,
+    pub fields: HashMap<Rc<String>, Value>, // Struct fields still use Rc<String> keys
 }
 
 #[derive(Clone, Debug)]
 pub enum Scope {
     Locals(RefCell<Vec<Value>>),
+    // Reverted to Rc<String> as key for Lexical scopes, matching original structure
     Lexical(Rc<RefCell<HashMap<Rc<String>, Value>>>),
 }
 
@@ -56,13 +57,14 @@ impl PartialEq for Value {
                 if l1.len() != l2.len() {
                     return false;
                 }
-                l1.iter().zip(l2.iter()).all(|(a, b)| a == b) // Deep comparison for lists
+                l1.iter().zip(l2.iter()).all(|(a, b)| a == b)
             }
             (Value::Closure(c1), Value::Closure(c2)) => Rc::ptr_eq(c1, c2),
-            (Value::StructInstance(si1), Value::StructInstance(si2)) => {
-                // For structs, typically reference equality unless deep value equality is desired
-                // For now, reference equality. If deep, compare type_name and fields.
-                Rc::ptr_eq(si1, si2)
+            (Value::StructInstance(si1_rc), Value::StructInstance(si2_rc)) => {
+                if Rc::ptr_eq(si1_rc, si2_rc) {
+                    return true;
+                }
+                si1_rc.borrow().eq(&si2_rc.borrow())
             }
             _ => false,
         }
@@ -109,7 +111,7 @@ impl fmt::Display for Value {
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v))
                     .collect();
-                field_items.sort(); // Sort for consistent output order
+                field_items.sort();
                 write!(f, "{}", field_items.join(", "))?;
                 write!(f, " }})")
             }

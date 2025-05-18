@@ -51,11 +51,13 @@ impl VirtualMachine {
         }
         self.bytecode_segments.clear();
         self.label_to_pc.clear();
+
         for (name, instructions) in segments {
             let segment_name_rc = Rc::new(name);
             let mut current_segment_labels = HashMap::new();
             let mut processed_instructions = Vec::new();
             let mut effective_pc = 0;
+
             for instr in instructions.iter() {
                 if let BytecodeInstruction::LabelDef(label_name) = instr {
                     if current_segment_labels
@@ -77,40 +79,54 @@ impl VirtualMachine {
             self.label_to_pc
                 .insert(segment_name_rc, current_segment_labels);
         }
+
         let main_segment_rc = Rc::new(main_segment_name.to_string());
         self.current_segment_name = main_segment_rc.clone();
         self.current_bytecode = self
             .bytecode_segments
             .get(&main_segment_rc)
             .ok_or_else(|| {
-                NsError::Vm(format!("Main segment '{}' disappeared.", main_segment_name))
+                NsError::Vm(format!(
+                    "Main segment '{}' disappeared after processing.",
+                    main_segment_name
+                ))
             })?
             .clone();
+
         self.ip = 0;
         self.operand_stack.clear();
         self.call_stack.clear();
-        let global_scope_map = Rc::new(RefCell::new(HashMap::new()));
-        let main_module_locals = Scope::Locals(RefCell::new(Vec::new()));
-        self.current_env_chain = vec![Scope::Lexical(global_scope_map), main_module_locals];
+        // Initialize with one global lexical scope using Rc<String> keys
+        let global_lexical_scope =
+            Scope::Lexical(Rc::new(RefCell::new(HashMap::<Rc<String>, Value>::new())));
+        self.current_env_chain = vec![global_lexical_scope];
+
         Ok(())
     }
 
     #[allow(dead_code)]
     fn current_indexed_locals_mut(&mut self) -> Option<std::cell::RefMut<Vec<Value>>> {
-        if let Some(Scope::Locals(locals_vec_rc)) = self.current_env_chain.last() {
-            Some(locals_vec_rc.borrow_mut())
-        } else {
-            None
+        for scope_variant in self.current_env_chain.iter().rev() {
+            if let Scope::Locals(locals_vec_rc) = scope_variant {
+                return Some(locals_vec_rc.borrow_mut());
+            }
         }
+        None
     }
 
-    fn lookup_variable(&self, name: &Rc<String>) -> Option<Value> {
+    // `name_to_find` is now &Rc<String> for lookup in HashMap<Rc<String>, Value>
+    fn lookup_variable(&self, name_to_find: &Rc<String>) -> Option<Value> {
         for scope_variant in self.current_env_chain.iter().rev() {
-            if let Scope::Lexical(scope_map_rc) = scope_variant {
-                let scope_map = scope_map_rc.borrow();
-                if let Some(value) = scope_map.get(name) {
-                    return Some(value.clone());
+            match scope_variant {
+                Scope::Lexical(scope_map_rc) => {
+                    let scope_map = scope_map_rc.borrow();
+                    // HashMap<Rc<String>, Value>::get takes &Q where Rc<String>: Borrow<Q>
+                    // So, `name_to_find` which is `&Rc<String>` works directly.
+                    if let Some(value) = scope_map.get(name_to_find) {
+                        return Some(value.clone());
+                    }
                 }
+                Scope::Locals(_locals_vec_rc) => { /* Skip */ }
             }
         }
         None
@@ -119,19 +135,12 @@ impl VirtualMachine {
     pub fn run(&mut self) -> Result<Option<Value>, NsError> {
         loop {
             if self.ip >= self.current_bytecode.len() {
-                if self.call_stack.is_empty() && self.current_segment_name.ends_with("_main") {
+                if self.call_stack.is_empty() {
                     break;
-                } else if !self.call_stack.is_empty() {
-                    return Err(NsError::Vm(format!(
-                        "Reached end of function segment '{}' (IP: {}, len: {}) without Return.",
-                        self.current_segment_name,
-                        self.ip,
-                        self.current_bytecode.len()
-                    )));
                 } else {
                     return Err(NsError::Vm(format!(
-                        "IP out of bounds in segment '{}' (IP: {}, len: {}). Expected Return or Halt.",
-                        self.current_segment_name, self.ip, self.current_bytecode.len()
+                        "Reached end of function segment '{}' without Return.",
+                        self.current_segment_name
                     )));
                 }
             }
@@ -139,13 +148,11 @@ impl VirtualMachine {
             let instruction = self.current_bytecode[self.ip].clone();
             self.ip += 1;
 
-            // println!("[VM] IP: {}, Seg: '{}', Instr: {:?}, Stack: {:?}", self.ip - 1, self.current_segment_name, instruction, self.operand_stack.iter().map(|v| format!("{}", v)).collect::<Vec<_>>());
-
             match instruction {
                 BytecodeInstruction::Operation(op) => match op {
                     OpCode::Halt => {
                         println!("Execution halted.");
-                        break;
+                        return Ok(self.operand_stack.pop());
                     }
                     OpCode::Pop => {
                         self.operand_stack
@@ -169,8 +176,7 @@ impl VirtualMachine {
                         let left_op = self.operand_stack.pop().ok_or_else(|| {
                             NsError::Vm(format!("{:?} needs 2 operands (missing 2nd)", op))
                         })?;
-
-                        match (left_op, right_op) {
+                        match (left_op.clone(), right_op.clone()) {
                             (Value::Number(l), Value::Number(r)) => {
                                 let result = match op {
                                     OpCode::Add => Value::Number(l + r),
@@ -198,7 +204,7 @@ impl VirtualMachine {
                                     OpCode::GreaterThanOrEqual => Value::Boolean(l >= r),
                                     OpCode::LessThanOrEqual => Value::Boolean(l <= r),
                                     OpCode::NotEqual => Value::Boolean(l != r),
-                                    _ => unreachable!("Binary op {:?} not handled for numbers", op),
+                                    _ => unreachable!(),
                                 };
                                 self.operand_stack.push(result);
                             }
@@ -214,13 +220,13 @@ impl VirtualMachine {
                             (v1, v2) if op == OpCode::NotEqual => {
                                 self.operand_stack.push(Value::Boolean(v1 != v2));
                             }
-                            (l_val, r_val) => {
+                            _ => {
                                 return Err(NsError::Vm(format!(
                                     "Type error for {:?}: Cannot operate on {:?} and {:?}",
                                     op,
-                                    l_val.type_name(),
-                                    r_val.type_name()
-                                )));
+                                    left_op.type_name(),
+                                    right_op.type_name()
+                                )))
                             }
                         }
                     }
@@ -232,212 +238,241 @@ impl VirtualMachine {
                         self.operand_stack.push(Value::Boolean(!val.is_truthy()));
                     }
                     OpCode::Print => {
-                        println!(
-                            "Output: {}",
-                            self.operand_stack
-                                .pop()
-                                .ok_or_else(|| NsError::Vm("PRINT requires a value".to_string()))?
-                        );
+                        let val = self
+                            .operand_stack
+                            .pop()
+                            .ok_or_else(|| NsError::Vm("PRINT requires a value".to_string()))?;
+                        println!("Output: {}", val);
+                        self.operand_stack.push(Value::NoneValue);
                     }
                     OpCode::ThrowError => {
-                        let msg_val = self.operand_stack.pop().ok_or_else(|| {
-                            NsError::Vm("ERROR primitive requires a message string".to_string())
+                        let msg = self.operand_stack.pop().ok_or_else(|| {
+                            NsError::Vm("ERROR primitive requires message".to_string())
                         })?;
-                        if let Value::String(s) = msg_val {
+                        if let Value::String(s) = msg {
                             return Err(NsError::Vm(format!("User Error: {}", s)));
                         } else {
                             return Err(NsError::Vm(format!(
-                                "ERROR primitive expects a string argument, got {}",
-                                msg_val.type_name()
+                                "ERROR expects string, got {}",
+                                msg.type_name()
                             )));
                         }
                     }
                     OpCode::Return => {
-                        if let Some(frame) = self.call_stack.pop() {
-                            self.ip = frame.return_pc;
-                            self.current_segment_name = frame.caller_segment_name;
+                        if let Some(f) = self.call_stack.pop() {
+                            self.ip = f.return_pc;
+                            self.current_segment_name = f.caller_segment_name;
                             self.current_bytecode = self
                                 .bytecode_segments
                                 .get(&self.current_segment_name)
-                                .expect("Caller segment")
+                                .unwrap()
                                 .clone();
-                            self.current_env_chain = frame.previous_env_chain;
+                            self.current_env_chain = f.previous_env_chain;
                         } else {
-                            break;
+                            return Ok(self.operand_stack.pop());
+                        }
+                    }
+                    OpCode::EnterScope => {
+                        self.current_env_chain
+                            .push(Scope::Lexical(Rc::new(RefCell::new(HashMap::new()))));
+                    }
+                    OpCode::ExitScope => {
+                        if self.current_env_chain.len() > 1 {
+                            let p = self.current_env_chain.pop().unwrap();
+                            if !matches!(p, Scope::Lexical(_)) {
+                                return Err(NsError::Vm(format!(
+                                    "ExitScope popped non-lexical: {:?}",
+                                    p.type_name_debug()
+                                )));
+                            }
+                        } else {
+                            return Err(NsError::Vm("ExitScope beyond global".to_string()));
                         }
                     }
                     OpCode::IsNone => {
-                        let val = self
+                        let v = self
                             .operand_stack
                             .pop()
                             .ok_or(NsError::Vm("IS_NONE needs operand".to_string()))?;
                         self.operand_stack
-                            .push(Value::Boolean(matches!(val, Value::NoneValue)));
+                            .push(Value::Boolean(matches!(v, Value::NoneValue)));
                     }
                     OpCode::Cons => {
-                        let item = self
+                        let i = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("CONS needs item".to_string()))?;
-                        let list_val = self
+                            .ok_or(NsError::Vm("CONS item".to_string()))?;
+                        let l = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("CONS needs list".to_string()))?;
-                        match list_val {
-                            Value::List(list_rc) => {
-                                let mut new_list = vec![item];
-                                new_list.extend_from_slice(&list_rc);
-                                self.operand_stack.push(Value::List(Rc::new(new_list)));
+                            .ok_or(NsError::Vm("CONS list".to_string()))?;
+                        match l {
+                            Value::List(lr) => {
+                                let mut n = vec![i];
+                                n.extend_from_slice(&lr);
+                                self.operand_stack.push(Value::List(Rc::new(n)));
                             }
                             Value::NoneValue => {
-                                self.operand_stack.push(Value::List(Rc::new(vec![item])));
+                                self.operand_stack.push(Value::List(Rc::new(vec![i])));
                             }
                             _ => {
                                 return Err(NsError::Vm(format!(
                                     "CONS expects list/none, got {}",
-                                    list_val.type_name()
-                                )));
+                                    l.type_name()
+                                )))
                             }
                         }
                     }
                     OpCode::First => {
-                        let list_val = self
+                        match self
                             .operand_stack
                             .pop()
-                            .ok_or_else(|| NsError::Vm("FIRST requires a list".to_string()))?;
-                        match list_val {
-                            Value::List(list_rc) => {
-                                if list_rc.is_empty() {
-                                    return Err(NsError::Vm(
-                                        "FIRST cannot operate on an empty list".to_string(),
-                                    ));
-                                }
-                                self.operand_stack.push(list_rc[0].clone());
+                            .ok_or_else(|| NsError::Vm("FIRST list".to_string()))?
+                        {
+                            Value::List(l) if !l.is_empty() => {
+                                self.operand_stack.push(l[0].clone())
                             }
-                            _ => {
+                            Value::List(_) => {
+                                return Err(NsError::Vm("FIRST on empty list".to_string()))
+                            }
+                            v => {
                                 return Err(NsError::Vm(format!(
-                                    "FIRST expects a list, got {}",
-                                    list_val.type_name()
+                                    "FIRST expects list, got {}",
+                                    v.type_name()
                                 )))
                             }
                         }
                     }
                     OpCode::Rest => {
-                        let list_val = self
+                        match self
                             .operand_stack
                             .pop()
-                            .ok_or_else(|| NsError::Vm("REST requires a list".to_string()))?;
-                        match list_val {
-                            Value::List(list_rc) => {
-                                if list_rc.is_empty() {
-                                    return Err(NsError::Vm(
-                                        "REST cannot operate on an empty list".to_string(),
-                                    ));
-                                }
-                                if list_rc.len() == 1 {
-                                    self.operand_stack.push(Value::NoneValue);
+                            .ok_or_else(|| NsError::Vm("REST list".to_string()))?
+                        {
+                            Value::List(l) if !l.is_empty() => {
+                                self.operand_stack.push(if l.len() == 1 {
+                                    Value::NoneValue
                                 } else {
-                                    self.operand_stack
-                                        .push(Value::List(Rc::new(list_rc[1..].to_vec())));
-                                }
+                                    Value::List(Rc::new(l[1..].to_vec()))
+                                })
                             }
-                            _ => {
+                            Value::List(_) => {
+                                return Err(NsError::Vm("REST on empty list".to_string()))
+                            }
+                            v => {
                                 return Err(NsError::Vm(format!(
-                                    "REST expects a list, got {}",
-                                    list_val.type_name()
+                                    "REST expects list, got {}",
+                                    v.type_name()
                                 )))
                             }
                         }
                     }
                     OpCode::IsBoolean => {
-                        let val = self
+                        let v = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("IS_BOOLEAN needs operand".to_string()))?;
+                            .ok_or(NsError::Vm("IS_BOOLEAN operand".to_string()))?;
                         self.operand_stack
-                            .push(Value::Boolean(matches!(val, Value::Boolean(_))));
+                            .push(Value::Boolean(matches!(v, Value::Boolean(_))));
                     }
                     OpCode::IsNumber => {
-                        let val = self
+                        let v = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("IS_NUMBER needs operand".to_string()))?;
+                            .ok_or(NsError::Vm("IS_NUMBER operand".to_string()))?;
                         self.operand_stack
-                            .push(Value::Boolean(matches!(val, Value::Number(_))));
+                            .push(Value::Boolean(matches!(v, Value::Number(_))));
                     }
                     OpCode::IsString => {
-                        let val = self
+                        let v = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("IS_STRING needs operand".to_string()))?;
+                            .ok_or(NsError::Vm("IS_STRING operand".to_string()))?;
                         self.operand_stack
-                            .push(Value::Boolean(matches!(val, Value::String(_))));
+                            .push(Value::Boolean(matches!(v, Value::String(_))));
                     }
                     OpCode::IsList => {
-                        let val = self
+                        let v = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("IS_LIST needs operand".to_string()))?;
+                            .ok_or(NsError::Vm("IS_LIST operand".to_string()))?;
                         self.operand_stack.push(Value::Boolean(matches!(
-                            val,
+                            v,
                             Value::List(_) | Value::NoneValue
                         )));
                     }
                     OpCode::IsStruct => {
-                        let val = self
+                        let v = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("IS_STRUCT needs operand".to_string()))?;
+                            .ok_or(NsError::Vm("IS_STRUCT operand".to_string()))?;
                         self.operand_stack
-                            .push(Value::Boolean(matches!(val, Value::StructInstance(_))));
+                            .push(Value::Boolean(matches!(v, Value::StructInstance(_))));
                     }
                     OpCode::IsFunction => {
-                        let val = self
+                        let v = self
                             .operand_stack
                             .pop()
-                            .ok_or(NsError::Vm("IS_FUNCTION needs operand".to_string()))?;
+                            .ok_or(NsError::Vm("IS_FUNCTION operand".to_string()))?;
                         self.operand_stack
-                            .push(Value::Boolean(matches!(val, Value::Closure(_))));
+                            .push(Value::Boolean(matches!(v, Value::Closure(_))));
                     }
-                    _ => return Err(NsError::Vm(format!("Op Op {:?} not implemented", op))),
+                    _ => return Err(NsError::Vm(format!("Unhandled Op: {:?}", op))),
                 },
                 BytecodeInstruction::Push(value) => self.operand_stack.push(value),
-                BytecodeInstruction::StoreGlobal(name) => {
+                BytecodeInstruction::StoreGlobal(name_str) => {
+                    // `name_str` is String from instruction
                     let value = self.operand_stack.pop().ok_or_else(|| {
-                        NsError::Vm(format!("STORE_GLOBAL '{}' needs value", name))
+                        NsError::Vm(format!("STORE_GLOBAL '{}' needs value", name_str))
                     })?;
-                    if let Some(Scope::Lexical(global_scope_rc)) = self.current_env_chain.first() {
-                        global_scope_rc.borrow_mut().insert(Rc::new(name), value);
-                    } else {
-                        return Err(NsError::Vm(
-                            "Global lexical scope missing for StoreGlobal".to_string(),
-                        ));
+                    let mut stored = false;
+                    let key_to_store = Rc::new(name_str); // Create Rc<String> for the key
+
+                    for scope in self.current_env_chain.iter_mut().rev() {
+                        if let Scope::Lexical(map_rc) = scope {
+                            map_rc
+                                .borrow_mut()
+                                .insert(key_to_store.clone(), value.clone());
+                            stored = true;
+                            break;
+                        }
+                    }
+                    if !stored {
+                        return Err(NsError::Vm(format!(
+                            "No lexical scope for StoreGlobal '{}'",
+                            key_to_store
+                        )));
                     }
                 }
-                BytecodeInstruction::LoadGlobal(name) => {
-                    let name_rc = Rc::new(name);
-                    match self.lookup_variable(&name_rc) {
+                BytecodeInstruction::LoadGlobal(name_str) => {
+                    // `name_str` is String from instruction
+                    let name_rc_to_lookup = Rc::new(name_str); // Create Rc<String> for lookup
+                    match self.lookup_variable(&name_rc_to_lookup) {
+                        // Pass &Rc<String>
                         Some(value) => self.operand_stack.push(value),
                         None => {
-                            return Err(NsError::Vm(format!("Variable '{}' not defined.", name_rc)))
+                            return Err(NsError::Vm(format!(
+                                "Variable '{}' not defined.",
+                                name_rc_to_lookup
+                            )))
                         }
                     }
                 }
                 BytecodeInstruction::MakeClosure { label, arity } => {
-                    let closure_name_opt = if label.starts_with("fn_body_") {
-                        label.split('_').last().map(|s| Rc::new(s.to_string()))
-                    } else {
-                        None
-                    };
-                    let closure = Closure {
-                        name: closure_name_opt,
+                    /* ... */
+                    self.operand_stack.push(Value::Closure(Rc::new(Closure {
+                        name: if label.starts_with("fn_body_") {
+                            label.rsplitn(2, '_').next().map(|s| Rc::new(s.to_string()))
+                        } else {
+                            None
+                        },
                         arity,
                         code_label: label,
                         defining_env: self.current_env_chain.clone(),
-                    };
-                    self.operand_stack.push(Value::Closure(Rc::new(closure)));
+                    })));
                 }
                 BytecodeInstruction::Call { arity } => {
+                    /* ... as before ... */
                     if self.operand_stack.len() < arity + 1 {
                         return Err(NsError::Vm(format!(
                             "Stack underflow for CALL: need {} args + closure, found {}",
@@ -446,44 +481,49 @@ impl VirtualMachine {
                         )));
                     }
                     let callee_val = self.operand_stack.pop().unwrap();
-
                     match callee_val {
                         Value::Closure(closure_rc) => {
                             let closure = &*closure_rc;
                             if closure.arity != arity {
                                 return Err(NsError::Vm(format!(
-                                    "Function '{}' called with incorrect arity. Expected {}, got {}.",
-                                    closure
-                                        .name
-                                        .as_ref()
-                                        .map_or_else(|| closure.code_label.as_str(), |n| n.as_str()),
+                                    "Function '{}' arity mismatch. Expected {}, got {}.",
+                                    closure.name.as_ref().map_or_else(
+                                        || closure.code_label.as_str(),
+                                        |n| n.as_str()
+                                    ),
                                     closure.arity,
                                     arity
                                 )));
                             }
-
-                            let frame = CallFrame {
+                            let mut fn_args = Vec::with_capacity(arity);
+                            if self.operand_stack.len() < arity {
+                                return Err(NsError::Vm(format!(
+                                    "Stack underflow for CALL args: need {}, found {}",
+                                    arity,
+                                    self.operand_stack.len()
+                                )));
+                            }
+                            for _ in 0..arity {
+                                fn_args.push(self.operand_stack.pop().unwrap());
+                            }
+                            fn_args.reverse();
+                            self.call_stack.push(CallFrame {
                                 return_pc: self.ip,
                                 caller_segment_name: self.current_segment_name.clone(),
                                 previous_env_chain: self.current_env_chain.clone(),
-                            };
-                            self.call_stack.push(frame);
-
-                            let new_local_values_vec = Vec::with_capacity(arity);
-                            let new_local_scope = Scope::Locals(RefCell::new(new_local_values_vec));
-
+                            });
                             self.current_env_chain = closure.defining_env.clone();
-                            self.current_env_chain.push(new_local_scope);
-
-                            let target_segment_name_rc = Rc::new(closure.code_label.clone());
-                            self.current_segment_name = target_segment_name_rc.clone();
+                            self.current_env_chain
+                                .push(Scope::Locals(RefCell::new(fn_args)));
+                            let target_segment_rc = Rc::new(closure.code_label.clone());
+                            self.current_segment_name = target_segment_rc.clone();
                             self.current_bytecode = self
                                 .bytecode_segments
-                                .get(&target_segment_name_rc)
+                                .get(&target_segment_rc)
                                 .ok_or_else(|| {
                                     NsError::Vm(format!(
                                         "Fn segment '{}' not found.",
-                                        target_segment_name_rc
+                                        target_segment_rc
                                     ))
                                 })?
                                 .clone();
@@ -491,55 +531,62 @@ impl VirtualMachine {
                         }
                         _ => {
                             return Err(NsError::Vm(format!(
-                                "Cannot call non-function value: {:?}",
+                                "Cannot call non-function: {}",
                                 callee_val.type_name()
-                            )));
+                            )))
                         }
                     }
                 }
                 BytecodeInstruction::StoreLocal(index) => {
+                    /* ... as before ... */
                     let value = self.operand_stack.pop().ok_or_else(|| {
                         NsError::Vm(format!("STORE_LOCAL index {} needs value", index))
                     })?;
-                    if let Some(Scope::Locals(locals_rc)) = self.current_env_chain.last() {
-                        let mut locals_vec = locals_rc.borrow_mut();
-                        if index >= locals_vec.len() {
-                            locals_vec.resize(index + 1, Value::NoneValue);
+                    let mut found = false;
+                    for scope in self.current_env_chain.iter_mut().rev() {
+                        if let Scope::Locals(locals_rc) = scope {
+                            let mut locals = locals_rc.borrow_mut();
+                            if index >= locals.len() {
+                                locals.resize(index + 1, Value::NoneValue);
+                            }
+                            locals[index] = value;
+                            found = true;
+                            break;
                         }
-                        locals_vec[index] = value;
-                    } else {
-                        let last_scope_type_dbg = self
-                            .current_env_chain
-                            .last()
-                            .map(|s| format!("{:?}", s))
-                            .unwrap_or_else(|| "None (empty chain)".to_string());
+                    }
+                    if !found {
                         return Err(NsError::Vm(format!(
-                            "No local scope (Scope::Locals) for StoreLocal. Innermost scope is: {}",
-                            last_scope_type_dbg
+                            "No Scope::Locals for StoreLocal({})",
+                            index
                         )));
                     }
                 }
                 BytecodeInstruction::LoadLocal(index) => {
-                    if let Some(Scope::Locals(locals_rc)) = self.current_env_chain.last() {
-                        let locals_vec = locals_rc.borrow();
-                        let value = locals_vec.get(index).cloned().ok_or_else(|| {
-                            NsError::Vm(format!(
-                                "Invalid local index {} (len {})",
-                                index,
-                                locals_vec.len()
-                            ))
-                        })?;
-                        self.operand_stack.push(value);
-                    } else {
-                        let last_scope_type_dbg = self
-                            .current_env_chain
-                            .last()
-                            .map(|s| format!("{:?}", s))
-                            .unwrap_or_else(|| "None (empty chain)".to_string());
-                        return Err(NsError::Vm(format!(
-                            "No local scope (Scope::Locals) for LoadLocal. Innermost scope is: {}",
-                            last_scope_type_dbg
-                        )));
+                    /* ... as before ... */
+                    let mut val_opt = None;
+                    for scope in self.current_env_chain.iter().rev() {
+                        if let Scope::Locals(locals_rc) = scope {
+                            let locals = locals_rc.borrow();
+                            if let Some(v) = locals.get(index) {
+                                val_opt = Some(v.clone());
+                                break;
+                            } else {
+                                return Err(NsError::Vm(format!(
+                                    "Invalid local index {} (len {}) for LoadLocal",
+                                    index,
+                                    locals.len()
+                                )));
+                            }
+                        }
+                    }
+                    match val_opt {
+                        Some(v) => self.operand_stack.push(v),
+                        None => {
+                            return Err(NsError::Vm(format!(
+                                "No Scope::Locals for LoadLocal({})",
+                                index
+                            )))
+                        }
                     }
                 }
                 BytecodeInstruction::Jump(ref target) => {
@@ -558,9 +605,10 @@ impl VirtualMachine {
                     return Err(NsError::Vm(format!(
                         "LabelDef at runtime IP {}",
                         self.ip - 1
-                    )));
+                    )))
                 }
                 BytecodeInstruction::MakeList { count } => {
+                    /* ... as before ... */
                     if self.operand_stack.len() < count {
                         return Err(NsError::Vm(format!(
                             "MAKE_LIST needs {} items, found {}",
@@ -568,17 +616,18 @@ impl VirtualMachine {
                             self.operand_stack.len()
                         )));
                     }
-                    let mut new_list = Vec::with_capacity(count);
+                    let mut nl = Vec::with_capacity(count);
                     for _ in 0..count {
-                        new_list.push(self.operand_stack.pop().unwrap());
+                        nl.push(self.operand_stack.pop().unwrap());
                     }
-                    new_list.reverse();
-                    self.operand_stack.push(Value::List(Rc::new(new_list)));
+                    nl.reverse();
+                    self.operand_stack.push(Value::List(Rc::new(nl)));
                 }
                 BytecodeInstruction::MakeStruct {
                     type_name,
                     field_names,
                 } => {
+                    /* ... as before ... */
                     if self.operand_stack.len() < field_names.len() {
                         return Err(NsError::Vm(format!(
                             "MAKE_STRUCT '{}' requires {} values, found {}",
@@ -587,75 +636,71 @@ impl VirtualMachine {
                             self.operand_stack.len()
                         )));
                     }
-                    let mut fields_map = HashMap::with_capacity(field_names.len());
-                    for field_name_str in field_names.iter().rev() {
-                        let value = self.operand_stack.pop().unwrap();
-                        fields_map.insert(Rc::new(field_name_str.clone()), value);
+                    let mut fm = HashMap::with_capacity(field_names.len());
+                    for name_str in field_names.iter().rev() {
+                        fm.insert(Rc::new(name_str.clone()), self.operand_stack.pop().unwrap());
                     }
-                    let struct_data = StructData {
-                        type_name: Rc::new(type_name),
-                        fields: fields_map,
-                    };
                     self.operand_stack
-                        .push(Value::StructInstance(Rc::new(RefCell::new(struct_data))));
+                        .push(Value::StructInstance(Rc::new(RefCell::new(StructData {
+                            type_name: Rc::new(type_name),
+                            fields: fm,
+                        }))));
                 }
                 BytecodeInstruction::GetField(field_name_str) => {
-                    let instance_val = self.operand_stack.pop().ok_or_else(|| {
-                        NsError::Vm(format!(
-                            "GET_FIELD '{}' requires a struct instance",
-                            field_name_str
-                        ))
-                    })?;
-                    match instance_val {
-                        Value::StructInstance(struct_data_rc) => {
-                            let struct_data = struct_data_rc.borrow();
-                            let field_name_rc = Rc::new(field_name_str);
-                            match struct_data.fields.get(&field_name_rc) {
-                                Some(value) => self.operand_stack.push(value.clone()),
+                    /* ... as before ... */
+                    match self.operand_stack.pop().ok_or_else(|| {
+                        NsError::Vm(format!("GET_FIELD '{}' requires instance", field_name_str))
+                    })? {
+                        Value::StructInstance(sd_rc) => {
+                            let sd = sd_rc.borrow();
+                            let fn_rc = Rc::new(field_name_str);
+                            match sd.fields.get(&fn_rc) {
+                                Some(v) => self.operand_stack.push(v.clone()),
                                 None => {
                                     return Err(NsError::Vm(format!(
                                         "Struct '{}' has no field '{}'",
-                                        struct_data.type_name, field_name_rc
+                                        sd.type_name, fn_rc
                                     )))
                                 }
                             }
                         }
-                        _ => {
+                        v => {
                             return Err(NsError::Vm(format!(
-                                "GET_FIELD expects a struct instance, got {}",
-                                instance_val.type_name()
+                                "GET_FIELD expects struct, got {}",
+                                v.type_name()
                             )))
                         }
                     }
                 }
                 BytecodeInstruction::SetField(field_name_str) => {
+                    /* ... as before ... */
                     if self.operand_stack.len() < 2 {
                         return Err(NsError::Vm(format!(
                             "SET_FIELD '{}' requires instance and value",
                             field_name_str
                         )));
                     }
-                    let new_value = self.operand_stack.pop().unwrap();
-                    let instance_val = self.operand_stack.pop().unwrap();
-                    match instance_val {
-                        Value::StructInstance(struct_data_rc) => {
-                            let mut struct_data = struct_data_rc.borrow_mut();
-                            let field_name_rc = Rc::new(field_name_str.clone());
-                            if struct_data.fields.contains_key(&field_name_rc) {
-                                struct_data.fields.insert(field_name_rc, new_value);
+                    let new_val = self.operand_stack.pop().unwrap();
+                    let inst_val = self.operand_stack.pop().unwrap();
+                    match inst_val {
+                        Value::StructInstance(sd_rc) => {
+                            let mut sd = sd_rc.borrow_mut();
+                            let fn_rc = Rc::new(field_name_str.clone());
+                            if sd.fields.contains_key(&fn_rc) {
+                                sd.fields.insert(fn_rc, new_val);
                                 self.operand_stack
-                                    .push(Value::StructInstance(struct_data_rc.clone()));
+                                    .push(Value::StructInstance(sd_rc.clone()));
                             } else {
                                 return Err(NsError::Vm(format!(
                                     "Struct '{}' has no field '{}' to set",
-                                    struct_data.type_name, field_name_str
+                                    sd.type_name, field_name_str
                                 )));
                             }
                         }
-                        _ => {
+                        v => {
                             return Err(NsError::Vm(format!(
-                                "SET_FIELD expects a struct instance, got {}",
-                                instance_val.type_name()
+                                "SET_FIELD expects struct, got {}",
+                                v.type_name()
                             )))
                         }
                     }
@@ -667,31 +712,24 @@ impl VirtualMachine {
 
     fn resolve_jump_target(&self, target: &StringOrPc) -> Result<usize, NsError> {
         match target {
-            StringOrPc::Label(label_name) => {
-                return self
-                    .label_to_pc
-                    .get(&self.current_segment_name)
-                    .and_then(|labels_in_segment| labels_in_segment.get(label_name))
-                    .copied()
-                    .ok_or_else(|| {
-                        NsError::Vm(format!(
-                            "Undefined label '{}' in seg '{}'",
-                            label_name, self.current_segment_name
-                        ))
-                    });
-            }
-            StringOrPc::Pc(pc_value) => {
-                return Ok(*pc_value);
-            }
+            StringOrPc::Label(label_name) => self
+                .label_to_pc
+                .get(&self.current_segment_name)
+                .and_then(|labels_in_segment| labels_in_segment.get(label_name))
+                .copied()
+                .ok_or_else(|| {
+                    NsError::Vm(format!(
+                        "Undefined label '{}' in seg '{}'",
+                        label_name, self.current_segment_name
+                    ))
+                }),
+            StringOrPc::Pc(pc_value) => Ok(*pc_value),
         }
     }
 }
 
-// Add a debug helper for Scope if it's not already deriving Debug
-// (It is deriving Debug in value.rs, so this is not strictly needed here but shown for completeness if it wasn't)
 impl Scope {
-    #[allow(dead_code)]
-    fn type_name_debug(&self) -> &'static str {
+    pub fn type_name_debug(&self) -> &'static str {
         match self {
             Scope::Locals(_) => "Scope::Locals",
             Scope::Lexical(_) => "Scope::Lexical",

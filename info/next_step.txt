@@ -1,0 +1,10 @@
+current next step:
+    we are currently working on cleaning up the codebase. 
+    we want to clean up run_notscheme.py and make that the entry point for the program.
+    we want to put the tests currently in notscheme elsewhere
+
+later:
+    we want to seperate compilation from execution perhaps
+    nscargo for building
+    change language base from python to rust
+

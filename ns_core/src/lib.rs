@@ -9,35 +9,31 @@ pub mod parser;
 pub mod value;
 pub mod vm;
 
-// pub mod compiler_pipeline; // For future logic similar to your Python ns.py
-
 pub fn get_ns_engine_greeting() -> String {
     let test_source = r#"
-        // Test 1: Loop that doesn't run
-        (print "T1 Start")
-        (while false 
-            (print "T1 Loop Body - FAIL") // This (print) should not execute
-        ) 
-        (print "T1 End")                  // The 'while' itself evaluates to 'none'
-
-        // Test 2: A while loop whose condition is initially true,
-        // but its body doesn't (and cannot with current valid syntax) change the condition variable
-        // to make it a simple, terminating loop.
-        // The previous error was due to invalid `(static ...)` usage inside the loop.
-        // This test will now become an infinite loop if `loop_cond_for_test2` remains true.
-        // To avoid an infinite loop in testing, we'll make the condition false initially for Test 2,
-        // similar to Test 1, just to ensure the structure doesn't cause other errors.
-        // A true multi-iteration terminating while loop test requires more features (like mutable structs and set-field, or set! for locals/globals).
-        (static loop_cond_for_test2 false) // Initialize to false
-        (print "T2 Start")
-        (while loop_cond_for_test2 // Condition is false, loop body should not execute
-            (print "T2 Loop Body - SHOULD NOT EXECUTE")
-            // No (static ...) here, as it's invalid syntax for an expression
+        (fn add (a b) 
+            (+ a b)
         )
-        (print "T2 End - after a non-running while")
 
-        // The final value on stack for the test report
-        "while tests done"
+        (fn simple_greet (name)
+            (print "Hello,")
+            (print name)
+            (print "from ns function!")
+            "done greeting" // Return value of simple_greet
+        )
+
+        (static result1 (add 10 25))
+        (print result1) // Expected console: Output: 35
+
+        (let message (simple_greet "Developer")) // Call simple_greet
+        (print message) // Expected console: Output: done greeting (return value of simple_greet)
+
+        // Test lambda
+        (let my_adder (lambda (x y) (+ x y)))
+        (print (my_adder 7 8)) // Expected console: Output: 15
+        
+        // Final value on stack for the test report
+        (add result1 (my_adder 1 2)) // 35 + 3 = 38
     "#;
 
     let mut output_report = String::new();
@@ -50,7 +46,7 @@ pub fn get_ns_engine_greeting() -> String {
             let mut parser = parser::Parser::new(&tokens);
             match parser.parse_program() {
                 Ok(program_node) => {
-                    let module_name = "test_while_mod".to_string();
+                    let module_name = "test_fn_call_mod".to_string();
                     let codegen = codegen::CodeGenerator::new(module_name.clone());
 
                     match codegen.generate_program(program_node) {
@@ -114,19 +110,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_full_pipeline_test_while_loop() {
+    fn run_full_pipeline_test_function_calls() {
         let report = get_ns_engine_greeting();
         println!("{}", report);
 
-        // The final expression is "while tests done"
-        assert!(report.contains("VM Final Result (from stack): while tests done"));
+        assert!(report.contains("VM Final Result (from stack): 38")); // 35 + 3
         assert!(report.contains("VM Program Loaded Successfully."));
         assert!(!report.contains("Lexer Error:"));
         assert!(!report.contains("Parser Error:"));
         assert!(!report.contains("Codegen Error:"));
         assert!(!report.contains("VM Load Error:"));
-        // Crucially, we expect NO runtime error now that the invalid (static...) is removed.
         assert!(!report.contains("VM Runtime Error:"));
-        assert!(!report.contains("Err(")); // General check for Result::Err in the report
+        assert!(!report.contains("Err("));
     }
 }

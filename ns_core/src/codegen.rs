@@ -243,20 +243,18 @@ impl CodeGenerator {
             Expression::Let(let_node_box) => self.generate_let_node(*let_node_box)?,
             Expression::Lambda(lambda_node_box) => self.generate_lambda_node(*lambda_node_box)?,
             Expression::Get(get_node_box) => {
-                // Implemented
                 let node = *get_node_box;
                 self.generate_expression(node.instance)?;
                 self.emit(BytecodeInstruction::GetField(node.field_name.to_string()));
             }
             Expression::Set(set_node_box) => {
-                // Implemented
                 let node = *set_node_box;
                 self.generate_expression(node.instance)?;
                 self.generate_expression(node.value)?;
                 self.emit(BytecodeInstruction::SetField(node.field_name.to_string()));
             }
             Expression::While(while_node_box) => {
-                // Implemented
+                // Logic for While
                 let node = *while_node_box;
                 let start_label = self.new_label_for_current_context("while_start");
                 let end_label = self.new_label_for_current_context("while_end");
@@ -268,22 +266,18 @@ impl CodeGenerator {
                 )));
 
                 if node.body.is_empty() {
-                    // If body is empty, an explicit jump back to condition is still needed.
-                    // The Python VM for (while false (print "loop")) does not print,
-                    // and for (while true) it's an infinite loop.
-                    // An empty body (while <cond>) means just re-evaluate.
+                    // No specific bytecode needed for an empty body before the loop jump.
                 } else {
                     for body_expr in node.body {
                         self.generate_expression(body_expr)?;
-                        self.emit_op(OpCode::Pop);
+                        self.emit_op(OpCode::Pop); // Results of body expressions are popped.
                     }
                 }
-                self.emit(BytecodeInstruction::Jump(StringOrPc::Label(start_label))); // Jump back to condition
+                self.emit(BytecodeInstruction::Jump(StringOrPc::Label(start_label))); // Jump back to condition.
                 self.emit(BytecodeInstruction::LabelDef(end_label));
-                self.emit(BytecodeInstruction::Push(Value::NoneValue)); // While loop evaluates to 'none'
+                self.emit(BytecodeInstruction::Push(Value::NoneValue)); // While loop evaluates to 'none'.
             }
             Expression::Begin(begin_node_box) => {
-                // Implemented
                 let node = *begin_node_box;
                 if node.expressions.is_empty() {
                     self.emit(BytecodeInstruction::Push(Value::NoneValue));
@@ -387,7 +381,7 @@ impl CodeGenerator {
 
         let num_body_exprs = node.body.len();
         if num_body_exprs == 0 {
-            self.exit_scope(); // Balance scope before erroring
+            self.exit_scope();
             self.current_segment_name = prev_segment_name;
             self.func_comp_context = prev_func_comp_context;
             return Err(NsError::Codegen(format!(
@@ -621,26 +615,20 @@ impl CodeGenerator {
         let else_label = self.new_label_for_current_context("else");
         let end_if_label = self.new_label_for_current_context("endif");
 
-        // Condition
         self.generate_expression(node.condition)?;
         self.emit(BytecodeInstruction::JumpIfFalse(StringOrPc::Label(
             else_label.clone(),
         )));
 
-        // Then branch
         self.generate_expression(node.then_branch)?;
         self.emit(BytecodeInstruction::Jump(StringOrPc::Label(
             end_if_label.clone(),
         )));
 
-        // Else branch
-        self.emit(BytecodeInstruction::LabelDef(else_label)); // Define the else_label
+        self.emit(BytecodeInstruction::LabelDef(else_label));
         self.generate_expression(node.else_branch)?;
-        // No jump needed here, execution flows into end_if_label definition
 
-        // End of if
-        self.emit(BytecodeInstruction::LabelDef(end_if_label)); // Define the end_if_label
-                                                                // The value of the if expression (either from then or else branch) is on the stack.
+        self.emit(BytecodeInstruction::LabelDef(end_if_label));
         Ok(())
     }
 

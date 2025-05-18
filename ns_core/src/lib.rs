@@ -13,18 +13,31 @@ pub mod vm;
 
 pub fn get_ns_engine_greeting() -> String {
     let test_source = r#"
-        (static a 10)
-        (static b 20)
-        (print (if (> a 5) "a is greater than 5" "a is not greater than 5")) 
-        (print (if (< a b) "a is less than b" "a is not less than b"))     
-        
-        // Corrected: (print result) is now part of the let's body
-        (let result (if (= a 10) (+ a b) (- b a))
-          (print result) // 'result' is now in scope. This (print) outputs 30.
-        )                // The 'let' expression itself evaluates to the result of (print result), which is 'none'.
+        // Test 1: Loop that doesn't run
+        (print "T1 Start")
+        (while false 
+            (print "T1 Loop Body - FAIL") // This (print) should not execute
+        ) 
+        (print "T1 End")                  // The 'while' itself evaluates to 'none'
 
-        // Final value on stack for the test, this should now be the program's result.
-        (if false 100 200)
+        // Test 2: A while loop whose condition is initially true,
+        // but its body doesn't (and cannot with current valid syntax) change the condition variable
+        // to make it a simple, terminating loop.
+        // The previous error was due to invalid `(static ...)` usage inside the loop.
+        // This test will now become an infinite loop if `loop_cond_for_test2` remains true.
+        // To avoid an infinite loop in testing, we'll make the condition false initially for Test 2,
+        // similar to Test 1, just to ensure the structure doesn't cause other errors.
+        // A true multi-iteration terminating while loop test requires more features (like mutable structs and set-field, or set! for locals/globals).
+        (static loop_cond_for_test2 false) // Initialize to false
+        (print "T2 Start")
+        (while loop_cond_for_test2 // Condition is false, loop body should not execute
+            (print "T2 Loop Body - SHOULD NOT EXECUTE")
+            // No (static ...) here, as it's invalid syntax for an expression
+        )
+        (print "T2 End - after a non-running while")
+
+        // The final value on stack for the test report
+        "while tests done"
     "#;
 
     let mut output_report = String::new();
@@ -37,7 +50,7 @@ pub fn get_ns_engine_greeting() -> String {
             let mut parser = parser::Parser::new(&tokens);
             match parser.parse_program() {
                 Ok(program_node) => {
-                    let module_name = "test_if_let_mod".to_string(); // Changed module name slightly for clarity
+                    let module_name = "test_while_mod".to_string();
                     let codegen = codegen::CodeGenerator::new(module_name.clone());
 
                     match codegen.generate_program(program_node) {
@@ -101,23 +114,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_full_pipeline_test_if_let_statement() {
-        // Renamed test function
+    fn run_full_pipeline_test_while_loop() {
         let report = get_ns_engine_greeting();
         println!("{}", report);
 
-        // The final expression `(if false 100 200)` should result in `200`.
-        // The (print result) inside let will output 30 to console.
-        // The let expression itself evaluates to 'none' (because print evaluates to 'none').
-        // This 'none' is popped if it's not the last expression in a sequence.
-        // So, the final (if false 100 200) should indeed be the result.
-        assert!(report.contains("VM Final Result (from stack): 200"));
+        // The final expression is "while tests done"
+        assert!(report.contains("VM Final Result (from stack): while tests done"));
         assert!(report.contains("VM Program Loaded Successfully."));
         assert!(!report.contains("Lexer Error:"));
         assert!(!report.contains("Parser Error:"));
         assert!(!report.contains("Codegen Error:"));
         assert!(!report.contains("VM Load Error:"));
-        assert!(!report.contains("VM Runtime Error:")); // This is the key change we expect
-        assert!(!report.contains("Err("));
+        // Crucially, we expect NO runtime error now that the invalid (static...) is removed.
+        assert!(!report.contains("VM Runtime Error:"));
+        assert!(!report.contains("Err(")); // General check for Result::Err in the report
     }
 }

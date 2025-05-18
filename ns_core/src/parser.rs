@@ -64,7 +64,7 @@ impl<'a> Parser<'a> {
 
     fn check_current_token_type(&self, expected_type: TokenType) -> bool {
         self.current_token()
-            .map_or(false, |t| t.token_type == expected_type)
+            .is_ok_and(|t| t.token_type == expected_type)
     }
 
     // --- Parsing Methods ---

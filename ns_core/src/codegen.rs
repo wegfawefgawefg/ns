@@ -305,7 +305,7 @@ impl CodeGenerator {
             std::mem::replace(&mut self.current_segment_name, fn_body_segment_name.clone());
         self.bytecode_segments
             .entry(self.current_segment_name.clone())
-            .or_insert_with(Vec::new);
+            .or_default();
 
         // Enter a new context for label generation within this function's segment
         self.enter_function_label_scope(fn_body_segment_name);

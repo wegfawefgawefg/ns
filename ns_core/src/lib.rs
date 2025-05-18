@@ -143,10 +143,10 @@ pub fn get_minimal_let_test_report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::NsError;
-    use crate::value::{StructData, Value};
-    use std::cell::RefCell;
-    use std::collections::HashMap;
+    
+    use crate::value::Value;
+    
+    
     use std::rc::Rc;
 
     fn expect_result(source: &str, module_name: &str, expected_val: Value) {
@@ -436,7 +436,7 @@ mod tests {
 #[cfg(test)]
 mod speed_tests {
     use super::*;
-    use crate::value::{StructData, Value};
+    use crate::value::Value;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;

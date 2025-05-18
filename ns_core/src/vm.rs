@@ -411,7 +411,7 @@ impl VirtualMachine {
                     // Store in the innermost lexical scope.
                     for scope in self.current_env_chain.iter_mut().rev() {
                         if let Scope::Lexical(map_rc) = scope {
-                            map_rc.borrow_mut().insert(name_str.clone(), value.clone()); // name_str is String, clone for key
+                            map_rc.borrow_mut().insert(name_str.clone(), value.clone());
                             stored = true;
                             break;
                         }
@@ -441,7 +441,7 @@ impl VirtualMachine {
                     param_names,
                 } => {
                     let name_opt = if label.starts_with("fn_body_") {
-                        label.rsplitn(2, '_').next().map(|s| Rc::new(s.to_string()))
+                        label.rsplit('_').next().map(|s| Rc::new(s.to_string()))
                     } else {
                         None
                     };
@@ -624,8 +624,10 @@ impl VirtualMachine {
                         Value::StructInstance(sd_rc) => {
                             let mut sd = sd_rc.borrow_mut();
                             let fn_rc = Rc::new(field_name_str.clone());
-                            if sd.fields.contains_key(&fn_rc) {
-                                sd.fields.insert(fn_rc, new_val);
+                            if let std::collections::hash_map::Entry::Occupied(mut e) =
+                                sd.fields.entry(fn_rc)
+                            {
+                                e.insert(new_val);
                                 self.operand_stack
                                     .push(Value::StructInstance(sd_rc.clone()));
                             } else {
@@ -663,5 +665,11 @@ impl VirtualMachine {
                 }),
             StringOrPc::Pc(pc_value) => Ok(*pc_value),
         }
+    }
+}
+
+impl Default for VirtualMachine {
+    fn default() -> Self {
+        Self::new()
     }
 }

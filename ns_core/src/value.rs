@@ -20,36 +20,39 @@ pub enum Value {
 /// Represents a closure in "ns".
 #[derive(Clone, Debug)]
 pub struct Closure {
-    pub name: Option<Rc<String>>,
+    pub name: Option<Rc<String>>, // Optional name for debugging/reflection
     pub arity: usize,
-    pub code_label: String,
-    pub defining_env: EnvironmentChain,
+    pub code_label: String, // Label of the bytecode segment for this closure's body
+    pub defining_env: EnvironmentChain, // The lexical environment captured at definition time
+    pub param_names: Vec<Rc<String>>, // Names of the parameters, in order
 }
 
 /// Represents the actual data of a struct instance.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructData {
     pub type_name: Rc<String>,
-    pub fields: HashMap<Rc<String>, Value>, // Struct fields still use Rc<String> keys
+    pub fields: HashMap<Rc<String>, Value>,
 }
 
+// Scope is now always a lexical scope (HashMap for named bindings)
 #[derive(Clone, Debug)]
 pub enum Scope {
-    Locals(RefCell<Vec<Value>>),
-    // Reverted to Rc<String> as key for Lexical scopes, matching original structure
-    Lexical(Rc<RefCell<HashMap<Rc<String>, Value>>>),
+    // Locals(RefCell<Vec<Value>>), // REMOVED
+    Lexical(Rc<RefCell<HashMap<String, Value>>>), // Key is String (variable name)
 }
 
-pub type EnvironmentChain = Vec<Scope>;
+pub type EnvironmentChain = Vec<Scope>; // A list of lexical scopes
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Number(n1), Value::Number(n2)) => n1 == n2,
             (Value::Boolean(b1), Value::Boolean(b2)) => b1 == b2,
-            (Value::String(s1), Value::String(s2)) => Rc::ptr_eq(s1, s2) || s1 == s2,
+            (Value::String(s1), Value::String(s2)) => Rc::ptr_eq(s1, s2) || **s1 == **s2,
             (Value::NoneValue, Value::NoneValue) => true,
-            (Value::QuotedSymbol(s1), Value::QuotedSymbol(s2)) => Rc::ptr_eq(s1, s2) || s1 == s2,
+            (Value::QuotedSymbol(s1), Value::QuotedSymbol(s2)) => {
+                Rc::ptr_eq(s1, s2) || **s1 == **s2
+            }
             (Value::List(l1), Value::List(l2)) => {
                 if Rc::ptr_eq(l1, l2) {
                     return true;
@@ -100,7 +103,17 @@ impl fmt::Display for Value {
                 if let Some(name) = &closure_rc.name {
                     write!(f, "<closure:{}:{}>", name, closure_rc.arity)
                 } else {
-                    write!(f, "<lambda:{}:{}>", closure_rc.code_label, closure_rc.arity)
+                    let params_str = closure_rc
+                        .param_names
+                        .iter()
+                        .map(|p| p.as_str())
+                        .collect::<Vec<&str>>()
+                        .join(" ");
+                    write!(
+                        f,
+                        "<lambda:({})#{}:{}>",
+                        params_str, closure_rc.code_label, closure_rc.arity
+                    )
                 }
             }
             Value::StructInstance(struct_data_rc) => {
@@ -138,6 +151,17 @@ impl Value {
             Value::Boolean(b) => *b,
             Value::NoneValue => false,
             _ => true,
+        }
+    }
+}
+
+// Ensure Scope also implements PartialEq if it's used in comparisons, though unlikely directly.
+// For debugging, ensure it can be printed.
+impl Scope {
+    #[allow(dead_code)]
+    pub fn type_name_debug(&self) -> &'static str {
+        match self {
+            Scope::Lexical(_) => "Scope::Lexical",
         }
     }
 }

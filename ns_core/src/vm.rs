@@ -20,7 +20,7 @@ pub struct VirtualMachine {
     ip: usize,
     operand_stack: Vec<Value>,
     call_stack: Vec<CallFrame>,
-    current_env_chain: EnvironmentChain,
+    current_env_chain: EnvironmentChain, // Vec<Scope>, where Scope is now only Scope::Lexical
     label_to_pc: HashMap<Rc<String>, HashMap<String, usize>>,
 }
 
@@ -86,47 +86,30 @@ impl VirtualMachine {
             .bytecode_segments
             .get(&main_segment_rc)
             .ok_or_else(|| {
-                NsError::Vm(format!(
-                    "Main segment '{}' disappeared after processing.",
-                    main_segment_name
-                ))
+                NsError::Vm(format!("Main segment '{}' disappeared.", main_segment_name))
             })?
             .clone();
 
         self.ip = 0;
         self.operand_stack.clear();
         self.call_stack.clear();
-        // Initialize with one global lexical scope using Rc<String> keys
-        let global_lexical_scope =
-            Scope::Lexical(Rc::new(RefCell::new(HashMap::<Rc<String>, Value>::new())));
-        self.current_env_chain = vec![global_lexical_scope];
+        // Initialize with one global lexical scope
+        self.current_env_chain = vec![Scope::Lexical(Rc::new(RefCell::new(HashMap::new())))];
 
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn current_indexed_locals_mut(&mut self) -> Option<std::cell::RefMut<Vec<Value>>> {
-        for scope_variant in self.current_env_chain.iter().rev() {
-            if let Scope::Locals(locals_vec_rc) = scope_variant {
-                return Some(locals_vec_rc.borrow_mut());
-            }
-        }
-        None
-    }
-
-    // `name_to_find` is now &Rc<String> for lookup in HashMap<Rc<String>, Value>
-    fn lookup_variable(&self, name_to_find: &Rc<String>) -> Option<Value> {
+    // `name_to_find` is &String for lookup in HashMap<String, Value>
+    fn lookup_variable(&self, name_to_find: &String) -> Option<Value> {
         for scope_variant in self.current_env_chain.iter().rev() {
             match scope_variant {
+                // Scope is always Scope::Lexical now
                 Scope::Lexical(scope_map_rc) => {
                     let scope_map = scope_map_rc.borrow();
-                    // HashMap<Rc<String>, Value>::get takes &Q where Rc<String>: Borrow<Q>
-                    // So, `name_to_find` which is `&Rc<String>` works directly.
                     if let Some(value) = scope_map.get(name_to_find) {
                         return Some(value.clone());
                     }
-                }
-                Scope::Locals(_locals_vec_rc) => { /* Skip */ }
+                } // Scope::Locals case removed
             }
         }
         None
@@ -421,18 +404,14 @@ impl VirtualMachine {
                 },
                 BytecodeInstruction::Push(value) => self.operand_stack.push(value),
                 BytecodeInstruction::StoreGlobal(name_str) => {
-                    // `name_str` is String from instruction
                     let value = self.operand_stack.pop().ok_or_else(|| {
                         NsError::Vm(format!("STORE_GLOBAL '{}' needs value", name_str))
                     })?;
                     let mut stored = false;
-                    let key_to_store = Rc::new(name_str); // Create Rc<String> for the key
-
+                    // Store in the innermost lexical scope.
                     for scope in self.current_env_chain.iter_mut().rev() {
                         if let Scope::Lexical(map_rc) = scope {
-                            map_rc
-                                .borrow_mut()
-                                .insert(key_to_store.clone(), value.clone());
+                            map_rc.borrow_mut().insert(name_str.clone(), value.clone()); // name_str is String, clone for key
                             stored = true;
                             break;
                         }
@@ -440,39 +419,41 @@ impl VirtualMachine {
                     if !stored {
                         return Err(NsError::Vm(format!(
                             "No lexical scope for StoreGlobal '{}'",
-                            key_to_store
+                            name_str
                         )));
                     }
                 }
                 BytecodeInstruction::LoadGlobal(name_str) => {
-                    // `name_str` is String from instruction
-                    let name_rc_to_lookup = Rc::new(name_str); // Create Rc<String> for lookup
-                    match self.lookup_variable(&name_rc_to_lookup) {
-                        // Pass &Rc<String>
+                    match self.lookup_variable(&name_str) {
+                        // Pass &String
                         Some(value) => self.operand_stack.push(value),
                         None => {
                             return Err(NsError::Vm(format!(
                                 "Variable '{}' not defined.",
-                                name_rc_to_lookup
+                                name_str
                             )))
                         }
                     }
                 }
-                BytecodeInstruction::MakeClosure { label, arity } => {
-                    /* ... */
+                BytecodeInstruction::MakeClosure {
+                    label,
+                    arity,
+                    param_names,
+                } => {
+                    let name_opt = if label.starts_with("fn_body_") {
+                        label.rsplitn(2, '_').next().map(|s| Rc::new(s.to_string()))
+                    } else {
+                        None
+                    };
                     self.operand_stack.push(Value::Closure(Rc::new(Closure {
-                        name: if label.starts_with("fn_body_") {
-                            label.rsplitn(2, '_').next().map(|s| Rc::new(s.to_string()))
-                        } else {
-                            None
-                        },
+                        name: name_opt,
                         arity,
                         code_label: label,
                         defining_env: self.current_env_chain.clone(),
+                        param_names, // Store param_names in the Closure
                     })));
                 }
                 BytecodeInstruction::Call { arity } => {
-                    /* ... as before ... */
                     if self.operand_stack.len() < arity + 1 {
                         return Err(NsError::Vm(format!(
                             "Stack underflow for CALL: need {} args + closure, found {}",
@@ -495,7 +476,8 @@ impl VirtualMachine {
                                     arity
                                 )));
                             }
-                            let mut fn_args = Vec::with_capacity(arity);
+
+                            let mut fn_args_values = Vec::with_capacity(arity);
                             if self.operand_stack.len() < arity {
                                 return Err(NsError::Vm(format!(
                                     "Stack underflow for CALL args: need {}, found {}",
@@ -504,17 +486,28 @@ impl VirtualMachine {
                                 )));
                             }
                             for _ in 0..arity {
-                                fn_args.push(self.operand_stack.pop().unwrap());
+                                fn_args_values.push(self.operand_stack.pop().unwrap());
                             }
-                            fn_args.reverse();
+                            fn_args_values.reverse(); // Arguments are popped in reverse order of pushing
+
                             self.call_stack.push(CallFrame {
                                 return_pc: self.ip,
                                 caller_segment_name: self.current_segment_name.clone(),
                                 previous_env_chain: self.current_env_chain.clone(),
                             });
-                            self.current_env_chain = closure.defining_env.clone();
+
+                            // Set up new environment for the function call
+                            self.current_env_chain = closure.defining_env.clone(); // Start with defining (lexical) environment
+                            let mut new_fn_scope_map = HashMap::new();
+                            for (i, param_name_rc) in closure.param_names.iter().enumerate() {
+                                new_fn_scope_map.insert(
+                                    param_name_rc.as_ref().clone(),
+                                    fn_args_values[i].clone(),
+                                ); // param_name_rc is Rc<String>, get String
+                            }
                             self.current_env_chain
-                                .push(Scope::Locals(RefCell::new(fn_args)));
+                                .push(Scope::Lexical(Rc::new(RefCell::new(new_fn_scope_map)))); // Add new lexical scope for params
+
                             let target_segment_rc = Rc::new(closure.code_label.clone());
                             self.current_segment_name = target_segment_rc.clone();
                             self.current_bytecode = self
@@ -537,58 +530,7 @@ impl VirtualMachine {
                         }
                     }
                 }
-                BytecodeInstruction::StoreLocal(index) => {
-                    /* ... as before ... */
-                    let value = self.operand_stack.pop().ok_or_else(|| {
-                        NsError::Vm(format!("STORE_LOCAL index {} needs value", index))
-                    })?;
-                    let mut found = false;
-                    for scope in self.current_env_chain.iter_mut().rev() {
-                        if let Scope::Locals(locals_rc) = scope {
-                            let mut locals = locals_rc.borrow_mut();
-                            if index >= locals.len() {
-                                locals.resize(index + 1, Value::NoneValue);
-                            }
-                            locals[index] = value;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        return Err(NsError::Vm(format!(
-                            "No Scope::Locals for StoreLocal({})",
-                            index
-                        )));
-                    }
-                }
-                BytecodeInstruction::LoadLocal(index) => {
-                    /* ... as before ... */
-                    let mut val_opt = None;
-                    for scope in self.current_env_chain.iter().rev() {
-                        if let Scope::Locals(locals_rc) = scope {
-                            let locals = locals_rc.borrow();
-                            if let Some(v) = locals.get(index) {
-                                val_opt = Some(v.clone());
-                                break;
-                            } else {
-                                return Err(NsError::Vm(format!(
-                                    "Invalid local index {} (len {}) for LoadLocal",
-                                    index,
-                                    locals.len()
-                                )));
-                            }
-                        }
-                    }
-                    match val_opt {
-                        Some(v) => self.operand_stack.push(v),
-                        None => {
-                            return Err(NsError::Vm(format!(
-                                "No Scope::Locals for LoadLocal({})",
-                                index
-                            )))
-                        }
-                    }
-                }
+                // StoreLocal and LoadLocal are removed
                 BytecodeInstruction::Jump(ref target) => {
                     self.ip = self.resolve_jump_target(target)?;
                 }
@@ -608,7 +550,6 @@ impl VirtualMachine {
                     )))
                 }
                 BytecodeInstruction::MakeList { count } => {
-                    /* ... as before ... */
                     if self.operand_stack.len() < count {
                         return Err(NsError::Vm(format!(
                             "MAKE_LIST needs {} items, found {}",
@@ -627,7 +568,6 @@ impl VirtualMachine {
                     type_name,
                     field_names,
                 } => {
-                    /* ... as before ... */
                     if self.operand_stack.len() < field_names.len() {
                         return Err(NsError::Vm(format!(
                             "MAKE_STRUCT '{}' requires {} values, found {}",
@@ -636,7 +576,7 @@ impl VirtualMachine {
                             self.operand_stack.len()
                         )));
                     }
-                    let mut fm = HashMap::with_capacity(field_names.len());
+                    let mut fm = HashMap::new();
                     for name_str in field_names.iter().rev() {
                         fm.insert(Rc::new(name_str.clone()), self.operand_stack.pop().unwrap());
                     }
@@ -647,7 +587,6 @@ impl VirtualMachine {
                         }))));
                 }
                 BytecodeInstruction::GetField(field_name_str) => {
-                    /* ... as before ... */
                     match self.operand_stack.pop().ok_or_else(|| {
                         NsError::Vm(format!("GET_FIELD '{}' requires instance", field_name_str))
                     })? {
@@ -673,7 +612,6 @@ impl VirtualMachine {
                     }
                 }
                 BytecodeInstruction::SetField(field_name_str) => {
-                    /* ... as before ... */
                     if self.operand_stack.len() < 2 {
                         return Err(NsError::Vm(format!(
                             "SET_FIELD '{}' requires instance and value",
@@ -724,15 +662,6 @@ impl VirtualMachine {
                     ))
                 }),
             StringOrPc::Pc(pc_value) => Ok(*pc_value),
-        }
-    }
-}
-
-impl Scope {
-    pub fn type_name_debug(&self) -> &'static str {
-        match self {
-            Scope::Locals(_) => "Scope::Locals",
-            Scope::Lexical(_) => "Scope::Lexical",
         }
     }
 }

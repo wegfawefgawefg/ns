@@ -1,36 +1,55 @@
 // ns_project_root/ns_core/src/codegen.rs
 use crate::ast::{
-    CallNode, Expression, FnNode, IfNode, LambdaNode, /* LetBinding, */ LetNode, ProgramNode,
-    QuotedData, StaticNode, StructDefNode, TopLevelForm, UseNode,
-}; // Removed unused LetBinding
+    CallNode,
+    Expression,
+    FnNode,
+    IfNode,
+    LambdaNode,
+    LetNode,
+    ProgramNode,
+    QuotedData,
+    StaticNode,
+    StructDefNode,
+    TopLevelForm,
+    UseNode,
+    // Removed GetNode, SetNode, WhileNode, BeginNode as they are part of Expression enum
+};
 use crate::error::NsError;
 use crate::opcode::{BytecodeInstruction, OpCode, StringOrPc};
 use crate::value::Value;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+// SymbolBinding is simplified as all named variables are now lexical.
+// We primarily distinguish between things known at compile time (functions, structs)
+// and general variables that will be resolved lexically at runtime.
 #[derive(Debug, Clone)]
-enum SymbolBinding {
-    Local { index: usize },
-    Global,
-    Function { label: String, arity: usize },
-    Struct { fields: Vec<Rc<String>> },
+enum SymbolResolution {
+    Lexical, // Will use LoadGlobal/StoreGlobal, VM handles lexical lookup
+             // CompileTimeFunction: Could be used for direct calls or arity checks if needed later
+             // CompileTimeStruct: Could be used for direct field count checks if needed later
 }
 
+// FunctionContext is simplified. It primarily manages labels for the current function/lambda body.
+// Named locals (parameters) are handled by the VM creating a new lexical scope.
 #[derive(Debug, Default)]
 struct FunctionContext {
-    label_prefix: String,
-    label_counter: usize,
-    named_locals: HashMap<Rc<String>, usize>,
-    local_idx_counter: usize,
+    label_prefix: String, // For generating unique labels within this function's segment
+    label_counter: usize, // Counter for unique labels
+                          // No need for named_locals or local_idx_counter here anymore,
+                          // as parameters become named entries in a new lexical scope created by the VM during CALL.
 }
 
 pub struct CodeGenerator {
     bytecode_segments: HashMap<String, Vec<BytecodeInstruction>>,
     current_segment_name: String,
-    function_contexts: Vec<FunctionContext>,
-    global_functions: HashMap<Rc<String>, (String, usize)>,
-    global_structs: HashMap<Rc<String>, Vec<Rc<String>>>,
+    function_contexts: Vec<FunctionContext>, // Stack for nested fn/lambda label generation
+
+    // These store info about globally visible definitions *within the current module being compiled*.
+    // This helps codegen know if a symbol is a function (for arity in MakeClosure) or struct (for MakeStruct).
+    global_functions: HashMap<Rc<String>, (String, usize, Vec<Rc<String>>)>, // name -> (segment_label, arity, param_names)
+    global_structs: HashMap<Rc<String>, Vec<Rc<String>>>,                    // name -> field_names
+
     discovered_dependencies: HashSet<String>,
     module_name: Rc<String>,
 }
@@ -46,10 +65,9 @@ impl CodeGenerator {
             bytecode_segments: segments,
             current_segment_name: main_segment_name.clone(),
             function_contexts: vec![FunctionContext {
+                // Context for the main module body
                 label_prefix: main_segment_name,
                 label_counter: 0,
-                named_locals: HashMap::new(),
-                local_idx_counter: 0,
             }],
             global_functions: HashMap::new(),
             global_structs: HashMap::new(),
@@ -64,27 +82,15 @@ impl CodeGenerator {
             .expect("Function context stack should not be empty")
     }
 
-    fn enter_function_scope(
-        &mut self,
-        fn_segment_name: String,
-        params: &[Rc<String>],
-    ) -> Result<(), NsError> {
-        let mut new_context = FunctionContext {
-            label_prefix: fn_segment_name.clone(),
+    // Enters a new context for generating labels within a function/lambda body.
+    fn enter_function_label_scope(&mut self, fn_segment_name_for_labels: String) {
+        self.function_contexts.push(FunctionContext {
+            label_prefix: fn_segment_name_for_labels,
             label_counter: 0,
-            named_locals: HashMap::new(),
-            local_idx_counter: 0,
-        };
-        for param_name in params {
-            let index = new_context.local_idx_counter;
-            new_context.named_locals.insert(param_name.clone(), index);
-            new_context.local_idx_counter += 1;
-        }
-        self.function_contexts.push(new_context);
-        Ok(())
+        });
     }
 
-    fn exit_function_scope(&mut self) {
+    fn exit_function_label_scope(&mut self) {
         if self.function_contexts.len() > 1 {
             self.function_contexts.pop();
         } else {
@@ -94,33 +100,16 @@ impl CodeGenerator {
         }
     }
 
-    #[allow(dead_code)]
-    fn define_indexed_local(&mut self, name: Rc<String>) -> Result<usize, NsError> {
-        let context = self.current_fn_context_mut();
-        let index = context.local_idx_counter;
-        context.named_locals.insert(name.clone(), index);
-        context.local_idx_counter += 1;
-        Ok(index)
-    }
-
-    fn find_symbol(&self, name: &Rc<String>) -> Option<SymbolBinding> {
-        if let Some(context) = self.function_contexts.last() {
-            if let Some(index) = context.named_locals.get(name) {
-                return Some(SymbolBinding::Local { index: *index });
-            }
+    // Determines how a symbol should be accessed.
+    // Now, all symbols that aren't built-in primitives or known struct constructors
+    // will resolve to SymbolResolution::Lexical.
+    fn resolve_symbol_type(&self, name: &Rc<String>) -> SymbolResolution {
+        if self.global_functions.contains_key(name) || self.global_structs.contains_key(name) {
+            // If it's a function or struct defined in this module, it's still accessed lexically
+            // via LoadGlobal. The VM will find the Closure or handle struct construction.
+            // This function is less critical now for Load/Store, but useful for Call/MakeStruct.
         }
-        if let Some((label, arity)) = self.global_functions.get(name) {
-            return Some(SymbolBinding::Function {
-                label: label.clone(),
-                arity: *arity,
-            });
-        }
-        if let Some(fields) = self.global_structs.get(name) {
-            return Some(SymbolBinding::Struct {
-                fields: fields.clone(),
-            });
-        }
-        Some(SymbolBinding::Global)
+        SymbolResolution::Lexical
     }
 
     fn current_bytecode_mut(&mut self) -> &mut Vec<BytecodeInstruction> {
@@ -226,17 +215,10 @@ impl CodeGenerator {
             Expression::String(s) => self.emit(BytecodeInstruction::Push(Value::String(s.clone()))),
             Expression::Boolean(b) => self.emit(BytecodeInstruction::Push(Value::Boolean(b))),
             Expression::NoneLiteral => self.emit(BytecodeInstruction::Push(Value::NoneValue)),
-            Expression::Symbol(name_rc) => match self.find_symbol(&name_rc) {
-                Some(SymbolBinding::Local { index }) => {
-                    self.emit(BytecodeInstruction::LoadLocal(index));
-                }
-                Some(SymbolBinding::Global)
-                | Some(SymbolBinding::Function { .. })
-                | Some(SymbolBinding::Struct { .. })
-                | None => {
-                    self.emit(BytecodeInstruction::LoadGlobal(name_rc.to_string()));
-                }
-            },
+            Expression::Symbol(name_rc) => {
+                // All symbols are loaded as globals; VM handles lexical lookup.
+                self.emit(BytecodeInstruction::LoadGlobal(name_rc.to_string()));
+            }
             Expression::Quote(data_box) => self.generate_quote_node(*data_box)?,
             Expression::Call(call_node_box) => self.generate_call_node(*call_node_box)?,
             Expression::If(if_node_box) => self.generate_if_node(*if_node_box)?,
@@ -312,6 +294,7 @@ impl CodeGenerator {
         Ok(())
     }
 
+    // Generates bytecode for a function/lambda body in a new segment.
     fn generate_fn_or_lambda_body(
         &mut self,
         params: Vec<Rc<String>>,
@@ -323,14 +306,20 @@ impl CodeGenerator {
         self.bytecode_segments
             .entry(self.current_segment_name.clone())
             .or_insert_with(Vec::new);
-        self.enter_function_scope(fn_body_segment_name, &params)?;
+
+        // Enter a new context for label generation within this function's segment
+        self.enter_function_label_scope(fn_body_segment_name);
+
+        // Parameters are handled by the VM's CALL instruction, which creates a new lexical scope
+        // and populates it with arguments bound to param_names.
+        // No StoreLocal opcodes are needed here for parameters.
 
         if body.is_empty() {
             let current_fn_label_prefix = self
                 .function_contexts
                 .last()
                 .map_or_else(|| "unknown_fn".to_string(), |ctx| ctx.label_prefix.clone());
-            self.exit_function_scope();
+            self.exit_function_label_scope();
             self.current_segment_name = prev_segment_name;
             return Err(NsError::Codegen(format!(
                 "Function/Lambda body ('{}') cannot be empty.",
@@ -346,7 +335,8 @@ impl CodeGenerator {
             }
         }
         self.emit_op(OpCode::Return);
-        self.exit_function_scope();
+
+        self.exit_function_label_scope();
         self.current_segment_name = prev_segment_name;
         Ok(())
     }
@@ -354,6 +344,8 @@ impl CodeGenerator {
     fn generate_fn_node(&mut self, node: FnNode) -> Result<(), NsError> {
         let fn_name_rc = node.name.clone();
         let arity = node.params.len();
+        let param_names_clone = node.params.clone(); // Clone for MakeClosure
+
         let sanitized_fn_name_for_label =
             fn_name_rc.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
         let body_segment_label = format!(
@@ -365,21 +357,30 @@ impl CodeGenerator {
         self.emit(BytecodeInstruction::MakeClosure {
             label: body_segment_label.clone(),
             arity,
+            param_names: param_names_clone,
         });
         self.emit(BytecodeInstruction::StoreGlobal(fn_name_rc.to_string()));
-        self.global_functions
-            .insert(fn_name_rc.clone(), (body_segment_label.clone(), arity));
+
+        self.global_functions.insert(
+            fn_name_rc.clone(),
+            (body_segment_label.clone(), arity, node.params.clone()),
+        );
+
         self.generate_fn_or_lambda_body(node.params, node.body, body_segment_label)?;
         Ok(())
     }
 
     fn generate_lambda_node(&mut self, node: LambdaNode) -> Result<(), NsError> {
         let arity = node.params.len();
+        let param_names_clone = node.params.clone(); // Clone for MakeClosure
         let lambda_body_segment_label = self.new_label("lambda_body");
+
         self.emit(BytecodeInstruction::MakeClosure {
             label: lambda_body_segment_label.clone(),
             arity,
+            param_names: param_names_clone,
         });
+
         self.generate_fn_or_lambda_body(node.params, node.body, lambda_body_segment_label)?;
         Ok(())
     }
@@ -418,7 +419,7 @@ impl CodeGenerator {
                 "not" => {
                     if num_args != 1 {
                         return Err(NsError::Codegen(format!(
-                            "Operator 'not' expects 1 arg, got {}",
+                            "'not' expects 1 arg, got {}",
                             num_args
                         )));
                     }
@@ -444,7 +445,7 @@ impl CodeGenerator {
                 "error" => {
                     if num_args != 1 {
                         return Err(NsError::Codegen(format!(
-                            "Primitive 'error' expects 1 arg, got {}",
+                            "'error' expects 1 arg, got {}",
                             num_args
                         )));
                     }
@@ -596,8 +597,7 @@ impl CodeGenerator {
         for binding in node.bindings.iter() {
             self.generate_expression(binding.value.clone())?;
             self.emit(BytecodeInstruction::StoreGlobal(binding.name.to_string()));
-            // The VM's StoreGlobal now pops the value. So, no extra Pop is needed here.
-            // self.emit_op(OpCode::Pop); // REMOVED THIS LINE
+            // VM's StoreGlobal pops the value. No extra Pop needed here.
         }
 
         if node.body.is_empty() {

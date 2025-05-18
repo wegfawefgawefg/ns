@@ -1,12 +1,12 @@
 #!/bin/bash
 
 clear
-# print now executing cargo build
-echo "Now executing cargo build"
-cargo build
-# print now executing cargo run
-echo "Now executing cargo run"
-cargo run --bin ns
-# print now executing cargo test
-echo "Now executing cargo test"
-cargo test -- --nocapture
+# print now executing cargo build --release
+echo "Now executing cargo build --release"
+cargo build --release
+# print now executing cargo run --release
+echo "Now executing cargo run --release"
+cargo run --bin ns --release 
+# print now executing cargo test --release
+echo "Now executing cargo test --release"
+cargo test --release -- --nocapture

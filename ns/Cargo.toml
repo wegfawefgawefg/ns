@@ -1,0 +1,7 @@
+[package]
+name = "ns"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ns_core = { path = "../ns_core" }

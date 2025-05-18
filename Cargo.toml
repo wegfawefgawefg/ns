@@ -1,0 +1,14 @@
+# ns_project_root/Cargo.toml
+[workspace]
+resolver = "2" # Recommended for new workspaces, enables newer Cargo features.
+members = [
+    "ns_core", # Will be our library for the "ns" language engine
+    "ns",      # Will be our binary for the "ns" command-line interface
+]
+
+# Optional: You can define shared build profiles for all workspace members here.
+# For example, to optimize release builds more aggressively:
+# [profile.release]
+# lto = true
+# codegen-units = 1
+# panic = "abort"

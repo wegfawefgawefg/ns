@@ -1,0 +1,10 @@
+# ns_project_root/ns_core/Cargo.toml
+[package]
+name = "ns_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1"
+lazy_static = "1.4.0" # For compiling regexes once
+# Dependencies for your core engine will go here later

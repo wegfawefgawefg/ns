@@ -30,8 +30,9 @@ SRC_DIRS=(
 
 # Array of titles corresponding to each source directory
 TITLES=(
-    "////// CORE"
+    "////// INFO"
     "////// NS"
+    "////// CORE"
 )
 
 # Array of explicit source files to concatenate (if any)
